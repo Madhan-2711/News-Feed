@@ -20,8 +20,9 @@ export async function GET(request) {
           .eq('id', user.id)
           .single();
 
-        // If interests are already configured, go to feed
-        const hasInterests = profile?.interests && Object.keys(profile.interests).length > 0;
+        // Only skip setup if at least one topic_* interest is actually saved
+        const hasInterests = profile?.interests &&
+          Object.keys(profile.interests).some(k => k.startsWith('topic_'));
         if (hasInterests) {
           return NextResponse.redirect(`${origin}/feed`);
         }
