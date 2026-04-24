@@ -11,7 +11,10 @@ const INTEREST_OPTIONS = [
   'Science', 'Travel', 'Comedy', 'Art',
   'News', 'Music', 'Finance', 'Sports',
   'AI & ML', 'Gaming', 'Food', 'Business',
+  'Nifty 50', 'Indian Economics', 'Bollywood', 'Environment',
 ];
+
+const MAX_TOPICS = 5;
 
 const LANGUAGES = [
   { code: 'en', name: 'English' },
@@ -97,11 +100,11 @@ export default function SetupPage() {
   }, []);
 
   const toggleInterest = (interest) => {
-    setSelected((prev) =>
-      prev.includes(interest)
-        ? prev.filter((i) => i !== interest)
-        : [...prev, interest]
-    );
+    setSelected((prev) => {
+      if (prev.includes(interest)) return prev.filter((i) => i !== interest);
+      if (prev.length >= MAX_TOPICS) return prev; // hard cap
+      return [...prev, interest];
+    });
   };
 
   const removeCustomInterest = async (custom) => {
@@ -121,6 +124,11 @@ export default function SetupPage() {
   const addCustom = async () => {
     const trimmed = customValue.trim();
     if (!trimmed) return;
+    if (selected.length >= MAX_TOPICS && !selected.includes(trimmed)) {
+      setCustomValue('');
+      setShowCustomInput(false);
+      return; // silently block — UI already shows the cap
+    }
     // Prevent duplicates — both with existing custom AND predefined interests
     if (customInterests.includes(trimmed) || selected.includes(trimmed)) return;
     // Don't allow adding predefined interests as custom
@@ -263,9 +271,33 @@ export default function SetupPage() {
           <span className="section-label__line" />
         </div>
 
+        {/* Counter + limit hint */}
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          marginBottom: '1rem',
+        }}>
+          <span style={{
+            fontFamily: 'var(--font-mono)', fontSize: '0.65rem',
+            color: selected.length >= MAX_TOPICS ? 'var(--accent)' : 'var(--fg-muted)',
+            letterSpacing: '0.07em', textTransform: 'uppercase',
+            fontWeight: selected.length >= MAX_TOPICS ? 700 : 400,
+          }}>
+            {selected.length} / {MAX_TOPICS} topics selected
+          </span>
+          {selected.length >= MAX_TOPICS && (
+            <span style={{
+              fontFamily: 'var(--font-mono)', fontSize: '0.6rem',
+              color: 'var(--fg-muted)', letterSpacing: '0.05em',
+            }}>
+              Remove one to add another
+            </span>
+          )}
+        </div>
+
         <div className="interest-grid">
           {INTEREST_OPTIONS.map((interest) => {
             const isActive = selected.includes(interest);
+            const isDisabled = !isActive && selected.length >= MAX_TOPICS;
             return (
               <button
                 key={interest}
@@ -273,7 +305,9 @@ export default function SetupPage() {
                 onClick={() => toggleInterest(interest)}
                 aria-pressed={isActive}
                 type="button"
+                disabled={isDisabled}
                 id={`interest-${interest.toLowerCase().replace(/[^a-z]/g, '')}`}
+                style={isDisabled ? { opacity: 0.35, cursor: 'not-allowed' } : {}}
               >
                 <span className="interest-pill__check">{isActive ? '✕' : '○'}</span>
                 {interest}
@@ -358,7 +392,7 @@ export default function SetupPage() {
 
         <div className="setup-actions">
           <div className="setup-count">
-            <strong>{selected.length}</strong> topic{selected.length !== 1 ? 's' : ''} selected
+            <strong>{selected.length}</strong>/{MAX_TOPICS} topic{selected.length !== 1 ? 's' : ''} selected
             {lang !== 'en' && <> · {LANGUAGES.find(l => l.code === lang)?.name}</>}
             {country && <> · {COUNTRIES.find(c => c.code === country)?.name}</>}
           </div>
