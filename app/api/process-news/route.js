@@ -367,16 +367,37 @@ export async function POST(request) {
 
     // ── Step 9: Daily Brief ────────────────────────────────────────
     try {
+      // Use only the top-scored articles to keep the prompt small (~2k tokens)
+      const briefArticles = relevantEntries
+        .slice(0, 10)
+        .map(e => ({ title: dbArticlesById[e.article_id]?.title || '' }))
+        .filter(a => a.title);
+
       const briefPrompt = buildDailyBriefPrompt(
-        dbArticles.map(a => ({ title: a.title })),
+        briefArticles,
         behavior.hasHistory ? { behavior: behavior.profileText } : statedInterests
       );
-      const brief = await generateWithRetry(briefPrompt);
-      if (brief?.trim().length > 20) {
+
+      // Try each Groq key in reverse order (last keys least used by article batches)
+      const numKeys = getKeyCount();
+      let brief = null;
+      for (let ki = numKeys - 1; ki >= 0; ki--) {
+        try {
+          const result = await generateWithKey(briefPrompt, ki);
+          if (result?.trim().length > 20) { brief = result.trim(); break; }
+        } catch (e) {
+          console.warn(`[brief] Key ${ki} failed: ${e.message?.slice(0, 60)}`);
+        }
+      }
+
+      if (brief) {
         await serviceClient
           .from('profiles')
-          .update({ daily_brief: brief.trim() })
+          .update({ daily_brief: brief })
           .eq('id', user.id);
+        console.log('[brief] Daily brief saved');
+      } else {
+        console.warn('[brief] All keys exhausted — brief skipped');
       }
     } catch (briefErr) {
       console.error('Daily brief error:', briefErr.message);
