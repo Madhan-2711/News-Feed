@@ -83,11 +83,12 @@ async function rankAndSummarize(articles, userInterests, behaviorProfile, recent
 // ── Save AI summaries back to daily_cache (universal cache) ────────
 async function saveSummariesToCache(serviceClient, rankings, dbArticlesById) {
   const updates = rankings
-    .filter(r => r.article_id && r.summary && r.cluster)
+    // Only cache articles that got a real AI summary AND a non-generic cluster
+    .filter(r => r.article_id && r.summary && r.cluster && r.cluster !== 'General')
     .map(r => ({
-      id:          r.article_id,
-      ai_summary:  r.summary,
-      cluster:     r.cluster,
+      id:         r.article_id,
+      ai_summary: r.summary,
+      cluster:    r.cluster,
     }));
 
   if (updates.length === 0) return;
@@ -243,9 +244,10 @@ export async function POST(request) {
     const dbArticlesById = Object.fromEntries(dbArticles.map(a => [a.id, a]));
 
     // ── Step 4: AI cache check ─────────────────────────────────────
-    // Articles already in daily_cache WITH ai_summary → skip AI entirely
-    const alreadyCached = dbArticles.filter(a => a.ai_summary && a.cluster);
-    const needsAI       = dbArticles.filter(a => !a.ai_summary || !a.cluster);
+    // Articles with a real non-generic cluster + summary → skip AI
+    // Articles with no summary, no cluster, OR cluster=General → re-send to AI
+    const alreadyCached = dbArticles.filter(a => a.ai_summary && a.cluster && a.cluster !== 'General');
+    const needsAI       = dbArticles.filter(a => !a.ai_summary || !a.cluster || a.cluster === 'General');
 
     console.log(`[cache] ${alreadyCached.length} articles have cached summaries, ${needsAI.length} need AI`);
 
@@ -292,13 +294,16 @@ export async function POST(request) {
       const fresh = rankings.find(r => r.article_id === article.id);
 
       // Derive a readable cluster from the article category if AI didn't provide one
-      const fallbackCluster = article.cluster
+      const fallbackCluster =
+        (article.cluster && article.cluster !== 'General' ? article.cluster : null)
         || (article.category ? article.category.charAt(0).toUpperCase() + article.category.slice(1) : null)
         || 'General';
 
-      // Derive a readable summary from the article content if AI didn't provide one
-      const fallbackSummary = (article.full_text || '').slice(0, 300).trim()
-        || null;
+      // Best-effort summary: title + first 250 chars of full_text
+      const rawText = (article.full_text || '').trim();
+      const fallbackSummary = rawText
+        ? rawText.slice(0, 260).trim() + (rawText.length > 260 ? '…' : '')
+        : null;
 
       if (fresh) {
         return {
