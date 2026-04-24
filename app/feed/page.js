@@ -38,7 +38,16 @@ export default function FeedPage() {
       .eq('user_id', userId)
       .order('score', { ascending: false });
 
-    if (feed && feed.length > 0) setFeedItems(feed);
+    if (feed && feed.length > 0) {
+      // Guard against stale duplicate rows (same article_id appearing more than once)
+      const seen = new Set();
+      const deduped = feed.filter(item => {
+        if (seen.has(item.article_id)) return false;
+        seen.add(item.article_id);
+        return true;
+      });
+      setFeedItems(deduped);
+    }
 
     const { data: profile } = await supabase
       .from('profiles')

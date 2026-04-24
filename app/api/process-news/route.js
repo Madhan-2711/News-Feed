@@ -240,8 +240,11 @@ export async function POST(request) {
       return NextResponse.json({ error: 'No articles could be processed' }, { status: 500 });
     }
 
-    const dbArticles = articles.filter(a => a.id);
-    const dbArticlesById = Object.fromEntries(dbArticles.map(a => [a.id, a]));
+    // Deduplicate by DB id — the same row can appear in both cachedRows and upsert return
+    const dbArticlesById = Object.fromEntries(
+      articles.filter(a => a.id).map(a => [a.id, a])
+    );
+    const dbArticles = Object.values(dbArticlesById);
 
     // ── Step 4: AI cache check ─────────────────────────────────────
     // Articles with a real non-generic cluster + summary → skip AI
