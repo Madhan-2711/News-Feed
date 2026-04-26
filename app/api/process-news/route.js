@@ -1,9 +1,12 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createClient as createServiceClient } from '@supabase/supabase-js';
-import { generateWithRetry, generateWithKey, getKeyCount } from '@/lib/gemini';
-import { buildRankingPrompt, buildDailyBriefPrompt } from '@/lib/openai/prompts';
 import { fetchFromAllSources } from '@/lib/sources/index';
+import { embedText, embedBatch } from '@/lib/embeddings';
+import {
+  scoreArticle, clusterArticle, extractSummary,
+  generateRationale, findBestInterest, buildBrief,
+} from '@/lib/scoring';
 
 function getServiceClient() {
   return createServiceClient(
@@ -31,7 +34,7 @@ function deduplicateArticles(items) {
 // ── Behavioral profile from click history ──────────────────────────
 function buildBehaviorProfile(clicks) {
   if (!clicks || clicks.length === 0) {
-    return { profileText: null, topTopics: [], recentTitles: [], hasHistory: false };
+    return { profileText: null, topTopics: [], topClusters: [], recentTitles: [], hasHistory: false };
   }
 
   const clusterCount = {};
@@ -61,49 +64,10 @@ function buildBehaviorProfile(clicks) {
   return {
     profileText,
     topTopics: sorted.slice(0, 5).map(([name]) => name),
+    topClusters: sorted.slice(0, 5).map(([name]) => name),
     recentTitles: recentTitles.slice(0, 20),
     hasHistory: clicks.length >= 3,
   };
-}
-
-// ── Groq: rank + summarize a batch of articles ─────────────────────
-async function rankAndSummarize(articles, userInterests, behaviorProfile, recentTitles, keyIndex = 0) {
-  const prompt = `You are a JSON-only response API. Return valid JSON arrays only. No markdown fences.\n\n${buildRankingPrompt(articles, userInterests, behaviorProfile, recentTitles)}`;
-  const content = await generateWithKey(prompt, keyIndex);
-  try {
-    const jsonMatch = content.match(/\[[\s\S]*\]/);
-    if (!jsonMatch) { console.error('AI no JSON array:', content.slice(0, 300)); return []; }
-    return JSON.parse(jsonMatch[0]);
-  } catch (err) {
-    console.error('AI JSON parse failed:', err.message);
-    return [];
-  }
-}
-
-// ── Save AI summaries back to daily_cache (universal cache) ────────
-async function saveSummariesToCache(serviceClient, rankings, dbArticlesById) {
-  const updates = rankings
-    // Only cache articles that got a real AI summary AND a non-generic cluster
-    .filter(r => r.article_id && r.summary && r.cluster && r.cluster !== 'General')
-    .map(r => ({
-      id:         r.article_id,
-      ai_summary: r.summary,
-      cluster:    r.cluster,
-    }));
-
-  if (updates.length === 0) return;
-
-  // Update each article's ai_summary and cluster in daily_cache
-  await Promise.all(
-    updates.map(u =>
-      serviceClient
-        .from('daily_cache')
-        .update({ ai_summary: u.ai_summary, cluster: u.cluster })
-        .eq('id', u.id)
-    )
-  );
-
-  console.log(`[cache] Saved AI summaries for ${updates.length} articles to daily_cache`);
 }
 
 // ── Main pipeline ──────────────────────────────────────────────────
@@ -198,14 +162,14 @@ export async function POST(request) {
     const deduped = deduplicateArticles(newsItems);
     console.log(`[process-news] ${deduped.length} unique articles after dedup`);
 
-    // ── Step 3: Upsert to daily_cache, fetch ai_summary if cached ─
-    // Select includes ai_summary + cluster so we can skip AI for already-summarized articles
+    // ── Step 3: Upsert to daily_cache ─────────────────────────────
+    // Sliding window: 36h instead of 24h so yesterday evening's news survives
     const urls   = deduped.map(i => i.link).filter(Boolean);
-    const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const cutoff = new Date(Date.now() - 36 * 60 * 60 * 1000).toISOString();
 
     const { data: cachedRows } = await serviceClient
       .from('daily_cache')
-      .select('id, title, full_text, source_url, image_url, source, ai_summary, cluster')
+      .select('id, title, full_text, source_url, image_url, source, category, published_at')
       .in('source_url', urls)
       .gte('fetched_at', cutoff);
 
@@ -231,7 +195,7 @@ export async function POST(request) {
       const { data: inserted } = await serviceClient
         .from('daily_cache')
         .upsert(insertData, { onConflict: 'source_url' })
-        .select('id, title, full_text, source_url, image_url, source, ai_summary, cluster');
+        .select('id, title, full_text, source_url, image_url, source, category, published_at');
 
       if (inserted) articles.push(...inserted);
     }
@@ -240,126 +204,83 @@ export async function POST(request) {
       return NextResponse.json({ error: 'No articles could be processed' }, { status: 500 });
     }
 
-    // Deduplicate by DB id — the same row can appear in both cachedRows and upsert return
+    // Deduplicate by DB id
     const dbArticlesById = Object.fromEntries(
       articles.filter(a => a.id).map(a => [a.id, a])
     );
     const dbArticles = Object.values(dbArticlesById);
 
-    // ── Step 4: AI cache check ─────────────────────────────────────
-    // Articles with a real non-generic cluster + summary → skip AI
-    // Articles with no summary, no cluster, OR cluster=General → re-send to AI
-    const alreadyCached = dbArticles.filter(a => a.ai_summary && a.cluster && a.cluster !== 'General');
-    const needsAI       = dbArticles.filter(a => !a.ai_summary || !a.cluster || a.cluster === 'General');
+    console.log(`[process-news] ${dbArticles.length} articles ready for scoring`);
 
-    console.log(`[cache] ${alreadyCached.length} articles have cached summaries, ${needsAI.length} need AI`);
+    // ── Step 4: Generate embeddings ───────────────────────────────
+    // Build user interest embedding
+    const interestText = fetchInterests.join(', ');
+    let userEmbedding = null;
+    const articleEmbeddings = {};
 
-    // ── Step 5: AI ranking only for uncached articles ─────────────
-    let rankings = [];
-    if (needsAI.length > 0) {
-      try {
-        const BATCH_SIZE = 8;
-        const numKeys    = getKeyCount();
-        const batches    = [];
-        for (let i = 0; i < needsAI.length; i += BATCH_SIZE) {
-          batches.push(needsAI.slice(i, i + BATCH_SIZE));
-        }
+    try {
+      console.log('[embeddings] Generating user interest embedding...');
+      userEmbedding = await embedText(interestText);
 
-        console.log(`[ai] ${batches.length} batches via Cerebras — running in parallel`);
+      // Generate article embeddings for articles that don't have one yet
+      const textsToEmbed = dbArticles.map(a =>
+        `${a.title}. ${(a.full_text || '').slice(0, 500)}`
+      );
 
-        const batchResults = await Promise.all(
-          batches.map((batch, batchIdx) => {
-            const keyIdx = batchIdx % numKeys; // round-robin key assignment
-            return rankAndSummarize(
-              batch,
-              statedInterests,
-              behavior.profileText,
-              behavior.recentTitles || [],
-              keyIdx,
-            )
-              .then(results => results.map(r => ({ ...r, article_id: batch[r.index]?.id })))
-              .catch(() => []);
-          })
-        );
-        rankings = batchResults.flat().filter(r => r.article_id);
+      console.log(`[embeddings] Generating embeddings for ${textsToEmbed.length} articles...`);
+      const startTime = Date.now();
+      const embeddings = await embedBatch(textsToEmbed);
+      console.log(`[embeddings] Done in ${((Date.now() - startTime) / 1000).toFixed(1)}s`);
 
-        // Save new summaries back to daily_cache for future users
-        await saveSummariesToCache(serviceClient, rankings, dbArticlesById);
-      } catch (aiErr) {
-        console.error('AI ranking error:', aiErr.message);
-      }
+      dbArticles.forEach((a, i) => {
+        articleEmbeddings[a.id] = embeddings[i];
+      });
+    } catch (embErr) {
+      console.error('[embeddings] Embedding generation failed:', embErr.message);
+      // Continue without embeddings — scoring will use keyword fallback
     }
 
-    // ── Step 6: Build feed entries ─────────────────────────────────
-    // For cached articles: reuse summary + cluster, assign score based on topic match
-    // For new AI results: use fresh score + summary + cluster
+    // ── Step 5: Score & rank articles ─────────────────────────────
+    // Attach source tag from deduped items for source quality scoring
+    const sourceTagByUrl = {};
+    deduped.forEach(d => { if (d.link) sourceTagByUrl[d.link] = d._sourceTag; });
+
     const feedEntries = dbArticles.map(article => {
-      const fresh = rankings.find(r => r.article_id === article.id);
+      const enriched = { ...article, _sourceTag: sourceTagByUrl[article.source_url] || 'unknown' };
+      const cluster = clusterArticle(article.title, article.full_text, article.category);
+      const score = scoreArticle(
+        enriched,
+        userEmbedding,
+        articleEmbeddings[article.id] || null,
+        fetchInterests,
+        behavior.topClusters || [],
+        cluster,
+      );
+      const summary = extractSummary(article.full_text);
+      const bestInterest = findBestInterest(article.title, fetchInterests);
+      const rationale = generateRationale(bestInterest, score);
 
-      // Derive a readable cluster from the article category if AI didn't provide one
-      const fallbackCluster =
-        (article.cluster && article.cluster !== 'General' ? article.cluster : null)
-        || (article.category ? article.category.charAt(0).toUpperCase() + article.category.slice(1) : null)
-        || 'General';
-
-      // Best-effort summary: title + first 250 chars of full_text
-      const rawText = (article.full_text || '').trim();
-      const fallbackSummary = rawText
-        ? rawText.slice(0, 260).trim() + (rawText.length > 260 ? '…' : '')
-        : null;
-
-      if (fresh) {
-        return {
-          user_id:      user.id,
-          article_id:   article.id,
-          ai_rationale: fresh.rationale  || 'Relevant to your interests.',
-          ai_summary:   fresh.summary    || fallbackSummary,
-          cluster:      fresh.cluster    || fallbackCluster,
-          score:        fresh.score      ?? 0.6,
-        };
-      }
-
-      if (article.ai_summary) {
-        const titleLower = (article.title || '').toLowerCase();
-        const interestMatch = fetchInterests.some(i =>
-          titleLower.includes((i || '').toLowerCase().split(' ')[0])
-        );
-        return {
-          user_id:      user.id,
-          article_id:   article.id,
-          ai_rationale: 'Matches your reading profile.',
-          ai_summary:   article.ai_summary,
-          cluster:      fallbackCluster,
-          score:        interestMatch ? 0.72 : 0.58,
-        };
-      }
-
-      // AI failed or timed out — use raw article content as summary
       return {
         user_id:      user.id,
         article_id:   article.id,
-        ai_rationale: 'Based on article content.',
-        ai_summary:   fallbackSummary,
-        cluster:      fallbackCluster,
-        score:        0.42,
+        ai_rationale: rationale,
+        ai_summary:   summary,
+        cluster,
+        score,
       };
     });
 
-
-    // ── Step 7: Select top 20 by score ────────────────────────────
-    // Sort all candidates by score DESC, take the 20 most relevant.
-    // No threshold cut — always return exactly 20 best-matched articles.
+    // ── Step 6: Select top 20 by score ────────────────────────────
     const TOP_N = 20;
     const ranked = [...feedEntries].sort((a, b) => b.score - a.score);
     const relevantEntries = ranked.slice(0, TOP_N);
 
     console.log(
       `[process-news] Top ${relevantEntries.length} selected ` +
-      `(scores: ${relevantEntries[0]?.score?.toFixed(2)} → ${relevantEntries[relevantEntries.length - 1]?.score?.toFixed(2)}) ` +
-      `| ${alreadyCached.length} from cache, ${rankings.length} fresh AI`
+      `(scores: ${relevantEntries[0]?.score?.toFixed(2)} → ${relevantEntries[relevantEntries.length - 1]?.score?.toFixed(2)})`
     );
 
-    // ── Step 8: Write user_news_feed ───────────────────────────────
+    // ── Step 7: Write user_news_feed ───────────────────────────────
     if (relevantEntries.length > 0) {
       await serviceClient.from('user_news_feed').delete().eq('user_id', user.id);
       const { error: feedErr } = await serviceClient
@@ -368,30 +289,18 @@ export async function POST(request) {
       if (feedErr) console.error('Feed insert error:', feedErr.message);
     }
 
-    // ── Step 9: Daily Brief ────────────────────────────────────────
+    // ── Step 8: Daily Brief (template-based) ──────────────────────
     try {
-      // Use only the top-scored articles to keep the prompt small (~2k tokens)
       const briefArticles = relevantEntries
         .slice(0, 10)
         .map(e => ({ title: dbArticlesById[e.article_id]?.title || '' }))
         .filter(a => a.title);
+      const briefClusters = relevantEntries
+        .slice(0, 10)
+        .map(e => e.cluster)
+        .filter(Boolean);
 
-      const briefPrompt = buildDailyBriefPrompt(
-        briefArticles,
-        behavior.hasHistory ? { behavior: behavior.profileText } : statedInterests
-      );
-
-      // Try each Groq key in reverse order (last keys least used by article batches)
-      const numKeys = getKeyCount();
-      let brief = null;
-      for (let ki = numKeys - 1; ki >= 0; ki--) {
-        try {
-          const result = await generateWithKey(briefPrompt, ki);
-          if (result?.trim().length > 20) { brief = result.trim(); break; }
-        } catch (e) {
-          console.warn(`[brief] Key ${ki} failed: ${e.message?.slice(0, 60)}`);
-        }
-      }
+      const brief = buildBrief(briefArticles, briefClusters);
 
       if (brief) {
         await serviceClient
@@ -399,14 +308,12 @@ export async function POST(request) {
           .update({ daily_brief: brief })
           .eq('id', user.id);
         console.log('[brief] Daily brief saved');
-      } else {
-        console.warn('[brief] All keys exhausted — brief skipped');
       }
     } catch (briefErr) {
       console.error('Daily brief error:', briefErr.message);
     }
 
-    // ── Step 10: Persist rate-limit counters ───────────────────────
+    // ── Step 9: Persist rate-limit counters ────────────────────────
     await serviceClient
       .from('profiles')
       .update({
@@ -424,8 +331,7 @@ export async function POST(request) {
     return NextResponse.json({
       success: true,
       articlesProcessed: relevantEntries.length,
-      fromCache: alreadyCached.length,
-      freshAI: rankings.length,
+      embeddingsGenerated: Object.keys(articleEmbeddings).length,
       sources: sourceTally,
       behaviorProfile: behavior.hasHistory ? behavior.profileText : null,
       mode: behavior.hasHistory ? 'behavior-driven' : 'interest-driven',

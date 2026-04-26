@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
+    "@huggingface/transformers": "^4.2.0",
     "@mendable/firecrawl-js": "^4.18.5",
     "@supabase/ssr": "^0.10.2",
     "@supabase/supabase-js": "^2.104.0",
