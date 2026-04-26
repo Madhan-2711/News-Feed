@@ -2,7 +2,6 @@ import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createClient as createServiceClient } from '@supabase/supabase-js';
 import { fetchFromAllSources } from '@/lib/sources/index';
-import { embedText, embedBatch } from '@/lib/embeddings';
 import {
   scoreArticle, clusterArticle, extractSummary,
   generateRationale, findBestInterest, buildBrief,
@@ -223,10 +222,12 @@ export async function POST(request) {
     const articleEmbeddings = {};
 
     try {
+      // Dynamic import so ONNX runtime failures don't crash the whole route
+      const { embedText, embedBatch } = await import('@/lib/embeddings');
+
       console.log('[embeddings] Generating user interest embedding...');
       userEmbedding = await embedText(interestText);
 
-      // Generate article embeddings for articles that don't have one yet
       const textsToEmbed = dbArticles.map(a =>
         `${a.title}. ${(a.full_text || '').slice(0, 500)}`
       );
@@ -240,8 +241,8 @@ export async function POST(request) {
         articleEmbeddings[a.id] = embeddings[i];
       });
     } catch (embErr) {
-      console.error('[embeddings] Embedding generation failed:', embErr.message);
-      // Continue without embeddings — scoring will use keyword fallback
+      console.warn('[embeddings] Unavailable — using keyword-only scoring:', embErr.message?.slice(0, 100));
+      // Falls back gracefully: vecSim defaults to 0.5 in scoreArticle()
     }
 
     // ── Step 5: Score & rank articles ─────────────────────────────
