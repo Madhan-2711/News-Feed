@@ -8,6 +8,10 @@ import {
   generateRationale, findBestInterest, buildBrief,
 } from '@/lib/scoring';
 
+// Allow up to 5 minutes on Vercel (covers cold-start model download + embedding)
+export const maxDuration = 300;
+
+
 function getServiceClient() {
   return createServiceClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL,
