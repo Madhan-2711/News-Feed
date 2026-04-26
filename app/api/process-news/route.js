@@ -265,7 +265,7 @@ export async function POST(request) {
           batches.push(needsAI.slice(i, i + BATCH_SIZE));
         }
 
-        console.log(`[ai] ${batches.length} batches across ${numKeys} keys — ${batches.length} parallel Groq calls`);
+        console.log(`[ai] ${batches.length} batches via Cerebras — running in parallel`);
 
         const batchResults = await Promise.all(
           batches.map((batch, batchIdx) => {
