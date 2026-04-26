@@ -221,28 +221,34 @@ export async function POST(request) {
     let userEmbedding = null;
     const articleEmbeddings = {};
 
-    try {
-      // Dynamic import so ONNX runtime failures don't crash the whole route
-      const { embedText, embedBatch } = await import('@/lib/embeddings');
+    // Embeddings: only attempt on localhost (Vercel serverless can't run ONNX)
+    // Keyword + recency + source quality scoring works well without embeddings
+    const isVercel = !!process.env.VERCEL;
 
-      console.log('[embeddings] Generating user interest embedding...');
-      userEmbedding = await embedText(interestText);
+    if (!isVercel) {
+      try {
+        const { embedText, embedBatch } = await import('@/lib/embeddings');
 
-      const textsToEmbed = dbArticles.map(a =>
-        `${a.title}. ${(a.full_text || '').slice(0, 500)}`
-      );
+        console.log('[embeddings] Generating user interest embedding...');
+        userEmbedding = await embedText(interestText);
 
-      console.log(`[embeddings] Generating embeddings for ${textsToEmbed.length} articles...`);
-      const startTime = Date.now();
-      const embeddings = await embedBatch(textsToEmbed);
-      console.log(`[embeddings] Done in ${((Date.now() - startTime) / 1000).toFixed(1)}s`);
+        const textsToEmbed = dbArticles.map(a =>
+          `${a.title}. ${(a.full_text || '').slice(0, 500)}`
+        );
 
-      dbArticles.forEach((a, i) => {
-        articleEmbeddings[a.id] = embeddings[i];
-      });
-    } catch (embErr) {
-      console.warn('[embeddings] Unavailable — using keyword-only scoring:', embErr.message?.slice(0, 100));
-      // Falls back gracefully: vecSim defaults to 0.5 in scoreArticle()
+        console.log(`[embeddings] Generating embeddings for ${textsToEmbed.length} articles...`);
+        const startTime = Date.now();
+        const embeddings = await embedBatch(textsToEmbed);
+        console.log(`[embeddings] Done in ${((Date.now() - startTime) / 1000).toFixed(1)}s`);
+
+        dbArticles.forEach((a, i) => {
+          articleEmbeddings[a.id] = embeddings[i];
+        });
+      } catch (embErr) {
+        console.warn('[embeddings] Unavailable — using keyword-only scoring:', embErr.message?.slice(0, 100));
+      }
+    } else {
+      console.log('[embeddings] Skipped on Vercel — using keyword + recency scoring');
     }
 
     // ── Step 5: Score & rank articles ─────────────────────────────
