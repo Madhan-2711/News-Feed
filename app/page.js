@@ -458,6 +458,9 @@ export default function LandingPage() {
       {/* News tabs */}
       <div className="home-split" style={{ paddingBottom: '4rem' }}>
 
+        {/* ── Left column: all tab content ────────────────────── */}
+        <div>
+
         {/* Tab switcher */}
         <div style={{ display: 'flex', gap: 0, marginBottom: '1.5rem', borderBottom: '1px solid var(--border)' }}>
           {tabs.map(tab => (
@@ -743,6 +746,9 @@ export default function LandingPage() {
             </p>
           )
         )}
+
+        </div>{/* end left column */}
+
         {/* ── Right: Live Category Sidebar ─────────────────── */}
         <aside className="live-sidebar">
           <div style={{
