@@ -17,8 +17,75 @@ const BOOT_LINES = [
 ];
 
 // Module-level cache — survives client-side navigation within the session
-const cache = { national: null, international: null, fetchedAt: null };
+const cache = {
+  national: null,
+  international: null,
+  liveCategories: null,
+  fetchedAt: null,
+};
 const CACHE_TTL_MS = 30 * 60 * 1000;
+
+// ── Helpers ──────────────────────────────────────────────────
+function timeAgo(iso) {
+  if (!iso) return '';
+  const mins = Math.floor((Date.now() - new Date(iso).getTime()) / 60000);
+  if (mins < 2)  return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  return `${Math.floor(mins / 60)}h ago`;
+}
+
+function LiveSkeleton() {
+  return (
+    <div className="live-skeleton">
+      {[1,2,3,4,5].map(i => (
+        <div key={i}>
+          <div className="live-skeleton__line" style={{ width: `${70 + (i % 3) * 10}%`, marginBottom: '4px' }} />
+          <div className="live-skeleton__line live-skeleton__line--short" />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function LiveCategory({ label, items, loading }) {
+  return (
+    <div className="live-category">
+      <div className="live-category__header">
+        <span className="live-dot" />
+        <span className="live-category__label">{label}</span>
+      </div>
+      {loading ? (
+        <LiveSkeleton />
+      ) : items.length === 0 ? (
+        <p style={{ fontSize: '0.75rem', color: 'var(--fg-muted)', padding: '0.25rem 0' }}>No stories right now.</p>
+      ) : (
+        items.map((item, i) => (
+          <a
+            key={i}
+            href={item.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="live-headline"
+          >
+            <span className="live-headline__num">{String(i + 1).padStart(2, '0')}</span>
+            <div className="live-headline__body">
+              <div className="live-headline__title">{item.title}</div>
+              <div className="live-headline__meta">
+                <span>{item.source}</span>
+                {item.publishedAt && (
+                  <>
+                    <span style={{ width: 2, height: 2, borderRadius: '50%', background: 'var(--fg-muted)', flexShrink: 0 }} />
+                    <span>{timeAgo(item.publishedAt)}</span>
+                  </>
+                )}
+              </div>
+            </div>
+          </a>
+        ))
+      )}
+    </div>
+  );
+}
 
 function isCacheValid() {
   return cache.fetchedAt && Date.now() - cache.fetchedAt < CACHE_TTL_MS;
@@ -34,6 +101,8 @@ export default function LandingPage() {
   const [nationalLoading, setNationalLoading] = useState(!isCacheValid());
   const [internationalLoading, setInternationalLoading] = useState(!isCacheValid());
   const [activeTab, setActiveTab] = useState('national');
+  const [liveCategories, setLiveCategories] = useState(cache.liveCategories || null);
+  const [liveCatsLoading, setLiveCatsLoading] = useState(!cache.liveCategories);
 
   // For You tab state
   const [forYouFeed, setForYouFeed] = useState([]);
@@ -130,8 +199,29 @@ export default function LandingPage() {
       }
     }
 
+    async function fetchLiveCategories() {
+      if (cache.liveCategories) {
+        setLiveCategories(cache.liveCategories);
+        setLiveCatsLoading(false);
+        return;
+      }
+      try {
+        const res = await fetch('/api/live-categories');
+        if (!cancelled && res.ok) {
+          const data = await res.json();
+          cache.liveCategories = data;
+          if (!cancelled) setLiveCategories(data);
+        }
+      } catch (err) {
+        console.error('Live categories error:', err);
+      } finally {
+        if (!cancelled) setLiveCatsLoading(false);
+      }
+    }
+
     fetchNational();
     fetchInternational();
+    fetchLiveCategories();
     return () => { cancelled = true; };
   }, [bootComplete]);
 
@@ -366,7 +456,7 @@ export default function LandingPage() {
       <div className="separator" style={{ margin: '0.75rem 0' }} />
 
       {/* News tabs */}
-      <div style={{ maxWidth: '48rem', margin: '0 auto', paddingBottom: '4rem', width: '100%' }}>
+      <div className="home-split" style={{ paddingBottom: '4rem' }}>
 
         {/* Tab switcher */}
         <div style={{ display: 'flex', gap: 0, marginBottom: '1.5rem', borderBottom: '1px solid var(--border)' }}>
@@ -653,6 +743,41 @@ export default function LandingPage() {
             </p>
           )
         )}
+        {/* ── Right: Live Category Sidebar ─────────────────── */}
+        <aside className="live-sidebar">
+          <div style={{
+            fontFamily: 'var(--font-mono)',
+            fontSize: '0.6rem',
+            letterSpacing: '0.12em',
+            textTransform: 'uppercase',
+            color: 'var(--fg-muted)',
+            marginBottom: '1.25rem',
+            paddingBottom: '0.5rem',
+            borderBottom: '2px solid var(--border)',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '0.5rem',
+          }}>
+            <span style={{ color: 'var(--accent)', fontWeight: 700 }}>Live</span>
+            <span>Top Stories</span>
+          </div>
+
+          <LiveCategory
+            label="Sports"
+            items={liveCategories?.sports || []}
+            loading={liveCatsLoading}
+          />
+          <LiveCategory
+            label="Politics"
+            items={liveCategories?.politics || []}
+            loading={liveCatsLoading}
+          />
+          <LiveCategory
+            label="Big Moves"
+            items={liveCategories?.bigMoves || []}
+            loading={liveCatsLoading}
+          />
+        </aside>
       </div>
     </div>
   );
