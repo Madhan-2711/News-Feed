@@ -75,6 +75,15 @@ export default function FeedPage() {
     setRateLimited(false);
     try {
       const res = await fetch('/api/process-news', { method: 'POST' });
+
+      // Handle non-JSON responses (Vercel timeout/crash pages return HTML)
+      const contentType = res.headers.get('content-type') || '';
+      if (!contentType.includes('application/json')) {
+        // Pipeline may have written data before timing out — reload feed
+        await loadFeed(user.id);
+        throw new Error('Server timed out, but your feed may have updated. Try refreshing.');
+      }
+
       const data = await res.json();
       if (res.status === 429) {
         setRateLimited(true);

@@ -7,8 +7,8 @@ import {
   generateRationale, findBestInterest, buildBrief,
 } from '@/lib/scoring';
 
-// Allow up to 5 minutes on Vercel (covers cold-start model download + embedding)
-export const maxDuration = 300;
+// Vercel Hobby max is 60s — enough since embeddings are skipped on Vercel
+export const maxDuration = 60;
 
 
 function getServiceClient() {
