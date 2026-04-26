@@ -774,8 +774,8 @@ export default function LandingPage() {
             loading={liveCatsLoading}
           />
           <LiveCategory
-            label="Politics"
-            items={liveCategories?.politics || []}
+            label="World News"
+            items={liveCategories?.world || []}
             loading={liveCatsLoading}
           />
           <LiveCategory

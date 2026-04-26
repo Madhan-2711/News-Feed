@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 
 const TOPIC_MAP = {
   sports:   'sports',
-  politics: 'nation',
+  world:    'world',       // global breaking news (White House, wars, etc.)
   business: 'business',
   tech:     'technology',
 };
@@ -42,14 +42,13 @@ async function fetchTopic(topic, keyIndex) {
 
 export async function GET() {
   // Fetch 3 categories in parallel — each uses a different key slot
-  const [sports, politics, bizRaw, techRaw] = await Promise.all([
+  const [sports, world, bizRaw, techRaw] = await Promise.all([
     fetchTopic(TOPIC_MAP.sports,   0),
-    fetchTopic(TOPIC_MAP.politics, 1),
+    fetchTopic(TOPIC_MAP.world,    1),
     fetchTopic(TOPIC_MAP.business, 2),
-    fetchTopic(TOPIC_MAP.tech,     2),   // shares key[2] — business + tech merged below
+    fetchTopic(TOPIC_MAP.tech,     2),
   ]);
 
-  // Merge business + tech, de-dup by url, take top 5
   const seen = new Set();
   const bigMoves = [...bizRaw, ...techRaw].filter(a => {
     if (seen.has(a.url)) return false;
@@ -57,5 +56,5 @@ export async function GET() {
     return true;
   }).slice(0, 5);
 
-  return NextResponse.json({ sports, politics, bigMoves });
+  return NextResponse.json({ sports, world, bigMoves });
 }
