@@ -257,7 +257,7 @@ export async function POST(request) {
         cluster,
       );
       const summary = extractSummary(article.full_text);
-      const bestInterest = findBestInterest(article.title, fetchInterests);
+      const bestInterest = findBestInterest(article.title, article.full_text, fetchInterests);
       const rationale = generateRationale(bestInterest, score);
 
       return {
@@ -270,9 +270,13 @@ export async function POST(request) {
       };
     });
 
-    // ── Step 6: Select top 20 by score ────────────────────────────
+    // Score floor: drop articles with score < 0.30 (clearly off-topic)
+    // Then take top 20 from what remains
+    const SCORE_FLOOR = 0.30;
     const TOP_N = 20;
-    const ranked = [...feedEntries].sort((a, b) => b.score - a.score);
+    const ranked = [...feedEntries]
+      .filter(e => e.score >= SCORE_FLOOR)
+      .sort((a, b) => b.score - a.score);
     const relevantEntries = ranked.slice(0, TOP_N);
 
     console.log(
