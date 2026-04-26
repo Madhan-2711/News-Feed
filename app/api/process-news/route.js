@@ -147,11 +147,11 @@ export async function POST(request) {
 
     const behavior = buildBehaviorProfile(clickRows);
 
-    const fetchInterests = behavior.hasHistory
-      ? behavior.topTopics
-      : Object.values(statedInterests).filter(Boolean);
+    // Always fetch by stated interests — behavior only adjusts scoring weight (5% boost)
+    // This prevents old click history from leaking into the rationale and topic sources
+    const fetchInterests = Object.values(statedInterests).filter(Boolean);
 
-    console.log(`[process-news] Fetch interests (${behavior.hasHistory ? 'behavior' : 'stated'}):`, JSON.stringify(fetchInterests));
+    console.log(`[process-news] Fetch interests (stated):`, JSON.stringify(fetchInterests));
 
     // ── Step 2: Fetch from all sources ────────────────────────────
     const newsItems = await fetchFromAllSources(fetchInterests, lang, country);
@@ -334,7 +334,7 @@ export async function POST(request) {
       embeddingsGenerated: Object.keys(articleEmbeddings).length,
       sources: sourceTally,
       behaviorProfile: behavior.hasHistory ? behavior.profileText : null,
-      mode: behavior.hasHistory ? 'behavior-driven' : 'interest-driven',
+      mode: 'interest-driven',
       quota: isPremium
         ? { isPremium: true, unlimited: true }
         : { isPremium: false, used: newCount, remaining: Math.max(0, DAILY_LIMIT - newCount), limit: DAILY_LIMIT },
