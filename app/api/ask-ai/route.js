@@ -96,9 +96,16 @@ export async function POST(request) {
     const context = finalContext || `Title: ${article.title}\nSource: ${article.source}`;
     const prompt = `${buildQAPrompt(context)}\n\nUser question: ${question}`;
 
-    const answer = await generateWithRetry(prompt);
+    const rawAnswer = await generateWithRetry(prompt);
+    
+    // Sanitize markdown artifacts for clean readable display
+    const cleanAnswer = (rawAnswer || '')
+      .replace(/\*\*/g, '')
+      .replace(/\*/g, '')
+      .replace(/^#{1,6}\s+/gm, '')
+      .trim();
 
-    return NextResponse.json({ answer: answer || 'No response generated.' });
+    return NextResponse.json({ answer: cleanAnswer || 'No response generated.' });
   } catch (error) {
     console.error('Ask AI error:', error);
     const isRateLimit = error.status === 429;
