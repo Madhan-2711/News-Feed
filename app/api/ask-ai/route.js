@@ -94,7 +94,7 @@ export async function POST(request) {
     }
 
     const context = finalContext || `Title: ${article.title}\nSource: ${article.source}`;
-    const prompt = `${buildQAPrompt(context)}\n\nUser question: ${question}`;
+    const prompt = buildQAPrompt(context, question);
 
     const rawAnswer = await generateWithRetry(prompt);
     
