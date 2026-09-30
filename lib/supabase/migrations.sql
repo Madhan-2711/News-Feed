@@ -8,12 +8,18 @@ CREATE TABLE IF NOT EXISTS profiles (
   id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
   email TEXT NOT NULL,
   interests JSONB DEFAULT '{"career": "", "sports": "", "finance": ""}'::jsonb,
+  lang TEXT DEFAULT 'en',
+  country TEXT DEFAULT '',
   last_fetch TIMESTAMPTZ,
   daily_fetch_count INT DEFAULT 0,
   fetch_reset_date DATE,
   is_premium BOOLEAN DEFAULT false,
+  daily_brief TEXT,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS lang TEXT DEFAULT 'en';
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS country TEXT DEFAULT '';
 
 -- Daily article cache
 CREATE TABLE IF NOT EXISTS daily_cache (
@@ -39,6 +45,7 @@ CREATE TABLE IF NOT EXISTS user_news_feed (
   article_id UUID REFERENCES daily_cache(id) ON DELETE CASCADE,
   ai_rationale TEXT,
   ai_summary TEXT,
+  ai_key_points JSONB DEFAULT '[]'::jsonb,
   cluster VARCHAR(100),
   score FLOAT4 DEFAULT 0,
   created_at TIMESTAMPTZ DEFAULT NOW(),
@@ -57,8 +64,9 @@ CREATE POLICY "Users can read own profile"
 CREATE POLICY "Users can update own profile"
   ON profiles FOR UPDATE USING (auth.uid() = id);
 
-CREATE POLICY "Users can insert own profile"
-  ON profiles FOR INSERT WITH CHECK (auth.uid() = id);
+-- Profiles are inserted by the signup trigger. Clients may edit preferences only.
+REVOKE INSERT, UPDATE ON TABLE public.profiles FROM PUBLIC, anon, authenticated;
+GRANT UPDATE (interests, lang, country) ON TABLE public.profiles TO authenticated;
 
 -- Daily cache policies (readable by all authenticated users)
 CREATE POLICY "Authenticated can read daily_cache"
@@ -122,6 +130,7 @@ ALTER TABLE daily_cache ADD COLUMN IF NOT EXISTS ai_summary TEXT;
 ALTER TABLE daily_cache ADD COLUMN IF NOT EXISTS cluster VARCHAR(100);
 
 ALTER TABLE user_news_feed ADD COLUMN IF NOT EXISTS ai_summary TEXT;
+ALTER TABLE user_news_feed ADD COLUMN IF NOT EXISTS ai_key_points JSONB DEFAULT '[]'::jsonb;
 ALTER TABLE user_news_feed ADD COLUMN IF NOT EXISTS cluster VARCHAR(100);
 
 ALTER TABLE profiles ADD COLUMN IF NOT EXISTS daily_fetch_count INT DEFAULT 0;

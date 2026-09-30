@@ -257,6 +257,7 @@ export default function FeedPage() {
                           source={item.daily_cache?.source}
                           imageUrl={item.daily_cache?.image_url}
                           href={`/feed/${item.article_id}`}
+                          articleId={item.article_id}
                         />
                       </ShineBorder>
                     );

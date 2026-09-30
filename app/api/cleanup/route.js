@@ -5,7 +5,12 @@ import { createClient as createServiceClient } from '@supabase/supabase-js';
 // Cleans stale articles from daily_cache (older than 48h)
 // and orphaned user_news_feed entries.
 
-export async function GET() {
+export async function GET(request) {
+  const cronSecret = process.env.CRON_SECRET;
+  if (!cronSecret || request.headers.get('authorization') !== `Bearer ${cronSecret}`) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+
   try {
     const serviceClient = createServiceClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL,
@@ -15,39 +20,14 @@ export async function GET() {
     const cutoff = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
 
     // 1. Delete old daily_cache entries
-    const { count: cacheDeleted } = await serviceClient
+    const { count: cacheDeleted, error: cleanupError } = await serviceClient
       .from('daily_cache')
       .delete({ count: 'exact' })
       .lt('fetched_at', cutoff);
+    if (cleanupError) throw cleanupError;
 
-    // 2. Delete orphaned user_news_feed entries (article no longer in cache)
-    // These are feed rows whose article was just cleaned up
-    const { data: validArticles } = await serviceClient
-      .from('daily_cache')
-      .select('id');
-
-    if (validArticles) {
-      const validIds = new Set(validArticles.map(a => a.id));
-
-      const { data: feedRows } = await serviceClient
-        .from('user_news_feed')
-        .select('id, article_id');
-
-      if (feedRows) {
-        const orphanIds = feedRows
-          .filter(f => !validIds.has(f.article_id))
-          .map(f => f.id);
-
-        if (orphanIds.length > 0) {
-          await serviceClient
-            .from('user_news_feed')
-            .delete()
-            .in('id', orphanIds);
-        }
-
-        console.log(`[cleanup] Cache: ${cacheDeleted || 0} deleted | Feed orphans: ${orphanIds.length} deleted`);
-      }
-    }
+    // user_news_feed and article_clicks reference daily_cache with ON DELETE CASCADE.
+    console.log(`[cleanup] Cache: ${cacheDeleted || 0} deleted`);
 
     return NextResponse.json({
       success: true,

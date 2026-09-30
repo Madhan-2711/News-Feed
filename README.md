@@ -1,5 +1,13 @@
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
+## Supabase profile permissions
+
+For an existing Supabase database, run [`lib/supabase/profile_permissions.sql`](lib/supabase/profile_permissions.sql) in the Supabase SQL Editor before deploying the setup-page update. It restricts signed-in users to editing their interests, language, and country; premium status and fetch counters remain server-managed. It also adds the article key-points column if needed. Deploying the app alone does not change database grants.
+
+## Scheduled cleanup
+
+Set `CRON_SECRET` in the Vercel project environment before deploying. Vercel sends it to `/api/cleanup` as a bearer token; cleanup and `/api/check-keys` return 401 without it. The personalized feed refreshes when a signed-in user opens the app or presses Refresh Feed. The previous `/api/process-news` cron entry was removed because Vercel calls cron routes with GET while that endpoint requires a signed-in POST request.
+
 ## Getting Started
 
 First, run the development server:
