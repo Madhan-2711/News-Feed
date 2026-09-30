@@ -1,44 +1,56 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# News Feed
 
-## Supabase profile permissions
+A personalized news reader built with Next.js and Supabase. Users sign in with Google, pick up to 5 topics plus a language and country, and get a feed of about 20 articles ranked for them. Each article has an **Ask AI** panel that answers questions about it.
 
-For an existing Supabase database, run [`lib/supabase/profile_permissions.sql`](lib/supabase/profile_permissions.sql) in the Supabase SQL Editor. The script can be rerun if the earlier version blocked setup saves. It permits both the currently deployed setup-page upsert and the updated preference save while premium status and fetch counters remain server-managed. It also adds the article key-points column if needed. Deploying the app alone does not change database grants.
+## How it works
 
-## Scheduled cleanup
+- **Sources:** each topic is searched on the Guardian, NewsAPI and GNews, with NewsData and RSS feeds added for background coverage (`lib/sources/`).
+- **Ranking:** articles are scored on keyword relevance to your topics, recency, source quality and your click history (`lib/scoring.js`). When running locally, a MiniLM embedding model adds semantic similarity; serverless hosts skip it.
+- **Ask AI:** short articles are scraped in full with Firecrawl, then answered by a rotating pool of OpenRouter, Groq and OpenAI (`lib/ai.js`).
+- **Limits:** free users get 2 feed refreshes and 10 Ask AI questions per day (`lib/limits.js`). Premium users are unlimited.
 
-Set `CRON_SECRET` in the Vercel project environment before deploying. Vercel sends it to `/api/cleanup` as a bearer token; cleanup and `/api/check-keys` return 401 without it. The personalized feed refreshes when a signed-in user opens the app or presses Refresh Feed. The previous `/api/process-news` cron entry was removed because Vercel calls cron routes with GET while that endpoint requires a signed-in POST request.
+## Environment variables
 
-## Getting Started
+Set these in `.env.local` for local development and in your host's project settings for deploys.
 
-First, run the development server:
+| Variable | Required | Used for |
+|---|---|---|
+| `NEXT_PUBLIC_SUPABASE_URL` | Yes | Supabase project URL |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Yes | Supabase browser key |
+| `SUPABASE_SERVICE_ROLE_KEY` | Yes | Server-side writes (feed, quotas, cache) |
+| `GNEWS_API_KEYS` | Yes | Comma-separated GNews keys (`GNEWS_API_KEY` also works for a single key) |
+| `GUARDIAN_API_KEY` | Recommended | Guardian source |
+| `NEWSAPI_KEY` | Recommended | NewsAPI source |
+| `NEWSDATA_API_KEY` | Optional | NewsData source |
+| `OPENROUTER_API_KEY`, `GROQ_API_KEY`, `OPENAI_API_KEY` | At least one | Ask AI answers |
+| `FIRECRAWL_API_KEY` | Optional | Full-text scraping for Ask AI |
+| `CRON_SECRET` | Yes, when deployed | Protects `/api/cleanup` and `/api/check-keys` |
+
+## Database setup
+
+Run these in the Supabase SQL Editor, in order. All three are safe to rerun.
+
+1. `lib/supabase/migrations.sql`: tables, row-level security and the signup trigger. It can be skipped for an existing database.
+2. `lib/supabase/profile_permissions.sql`: limits which profile columns users can write, so premium status and counters stay server-only.
+3. `lib/supabase/quota_hardening.sql`: makes the daily limits atomic, adds the Ask AI counters, and adds the `user_news_feed` unique constraint that older databases lack.
+
+Deploying the app doesn't change the database. Until step 3 has run, the app still works, but it falls back to a non-atomic limit check and doesn't limit Ask AI.
+
+## Hosting
+
+The app deploys on **Vercel** (current) or **Netlify** (`netlify.toml`).
+
+- **Scheduled cleanup:** `vercel.json` runs `/api/cleanup` daily at 04:00 UTC, which deletes cached articles older than 48 hours. Vercel sends `CRON_SECRET` as a bearer token. Netlify doesn't read `vercel.json`, so on Netlify you'd need to schedule that call separately.
+- **Feed refresh:** there's no cron for it. The personalized feed refreshes when a signed-in user opens the app or presses Fetch News.
+- **Embeddings:** these only run locally. On Vercel and Netlify, ranking uses keywords, recency and source quality.
+
+## Development
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm install
+npm run dev     # http://localhost:3000
+npm test        # unit tests (node --test)
+npm run build   # production build
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
-
-You can start editing the page by modifying `app/page.js`. The page auto-updates as you edit the file.
-
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
-
-## Learn More
-
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+This project uses Next.js 16, which changes some APIs; for example, `proxy.js` replaces `middleware.js`. See `AGENTS.md`.

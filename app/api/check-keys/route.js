@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { checkAllKeys } from '@/lib/gemini';
+import { checkAllKeys } from '@/lib/ai';
 
 export async function GET(request) {
   const cronSecret = process.env.CRON_SECRET;

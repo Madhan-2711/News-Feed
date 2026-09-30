@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { scoreArticle, findBestInterest, generateRationale } from '../lib/scoring.js';
+import { scoreArticle, findBestInterest, generateRationale, clusterArticle } from '../lib/scoring.js';
 
 const freshArticle = {
   title: 'A new local headline',
@@ -61,4 +61,16 @@ test('rationale never names an interest the article does not match', () => {
 
 test('a specific interest is preferred over the general News interest', () => {
   assert.equal(findBestInterest('Cricket news: India win', '', ['News', 'Cricket']), 'Cricket');
+});
+
+test('clusterArticle checks sports before tech', () => {
+  assert.equal(clusterArticle('IPL final: Mumbai beat Chennai', ''), 'Cricket');
+  assert.equal(clusterArticle('OpenAI releases a new LLM', ''), 'AI & Tech');
+});
+
+test('clusterArticle short keywords need word boundaries', () => {
+  // "said" contains "ai" but must not be read as an AI story
+  assert.equal(clusterArticle('Minister said the plan is on track', '', 'general'), 'Politics');
+  assert.equal(clusterArticle('Local bakery wins award', '', 'general'), 'General');
+  assert.equal(clusterArticle('Local bakery wins award', '', 'food'), 'Food');
 });

@@ -1,6 +1,6 @@
 -- ============================================================
 -- NEWS FEED — Supabase Database Migration
--- Run this in your Supabase SQL Editor
+-- Run this in your Supabase SQL Editor. Safe to rerun.
 -- ============================================================
 
 -- Profiles table (auto-created on signup via trigger)
@@ -15,6 +15,8 @@ CREATE TABLE IF NOT EXISTS profiles (
   fetch_reset_date DATE,
   is_premium BOOLEAN DEFAULT false,
   daily_brief TEXT,
+  ai_query_count INT DEFAULT 0,
+  ai_query_reset_date DATE,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -58,12 +60,15 @@ ALTER TABLE user_news_feed ENABLE ROW LEVEL SECURITY;
 ALTER TABLE daily_cache ENABLE ROW LEVEL SECURITY;
 
 -- Profiles policies
+DROP POLICY IF EXISTS "Users can read own profile" ON profiles;
 CREATE POLICY "Users can read own profile"
   ON profiles FOR SELECT USING (auth.uid() = id);
 
+DROP POLICY IF EXISTS "Users can update own profile" ON profiles;
 CREATE POLICY "Users can update own profile"
   ON profiles FOR UPDATE USING (auth.uid() = id);
 
+DROP POLICY IF EXISTS "Users can insert own profile" ON profiles;
 CREATE POLICY "Users can insert own profile"
   ON profiles FOR INSERT WITH CHECK (auth.uid() = id);
 
@@ -73,16 +78,20 @@ GRANT INSERT (id, email, interests, lang, country) ON TABLE public.profiles TO a
 GRANT UPDATE (id, email, interests, lang, country) ON TABLE public.profiles TO authenticated;
 
 -- Daily cache policies (readable by all authenticated users)
+DROP POLICY IF EXISTS "Authenticated can read daily_cache" ON daily_cache;
 CREATE POLICY "Authenticated can read daily_cache"
   ON daily_cache FOR SELECT USING (auth.role() = 'authenticated' OR auth.role() = 'service_role');
 
+DROP POLICY IF EXISTS "Service role can manage daily_cache" ON daily_cache;
 CREATE POLICY "Service role can manage daily_cache"
   ON daily_cache FOR ALL USING (auth.role() = 'service_role');
 
 -- User news feed policies
+DROP POLICY IF EXISTS "Users can read own feed" ON user_news_feed;
 CREATE POLICY "Users can read own feed"
   ON user_news_feed FOR SELECT USING (auth.uid() = user_id);
 
+DROP POLICY IF EXISTS "Service role can manage feed" ON user_news_feed;
 CREATE POLICY "Service role can manage feed"
   ON user_news_feed FOR ALL USING (auth.role() = 'service_role');
 
@@ -90,8 +99,10 @@ CREATE POLICY "Service role can manage feed"
 CREATE OR REPLACE FUNCTION public.handle_new_user()
 RETURNS TRIGGER AS $$
 BEGIN
+  -- email is NOT NULL; fall back so a provider without metadata email
+  -- can't block signup.
   INSERT INTO public.profiles (id, email)
-  VALUES (NEW.id, NEW.raw_user_meta_data ->> 'email');
+  VALUES (NEW.id, COALESCE(NEW.email, NEW.raw_user_meta_data ->> 'email', ''));
   RETURN NEW;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
@@ -119,9 +130,11 @@ CREATE TABLE IF NOT EXISTS article_clicks (
 
 ALTER TABLE article_clicks ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Users can insert own clicks" ON article_clicks;
 CREATE POLICY "Users can insert own clicks"
   ON article_clicks FOR INSERT WITH CHECK (auth.uid() = user_id);
 
+DROP POLICY IF EXISTS "Service role can read clicks" ON article_clicks;
 CREATE POLICY "Service role can read clicks"
   ON article_clicks FOR SELECT USING (auth.role() = 'service_role');
 
@@ -141,3 +154,9 @@ ALTER TABLE profiles ADD COLUMN IF NOT EXISTS daily_fetch_count INT DEFAULT 0;
 ALTER TABLE profiles ADD COLUMN IF NOT EXISTS fetch_reset_date DATE;
 ALTER TABLE profiles ADD COLUMN IF NOT EXISTS is_premium BOOLEAN DEFAULT false;
 ALTER TABLE profiles ADD COLUMN IF NOT EXISTS daily_brief TEXT;
+
+-- ── Next steps ───────────────────────────────────────────────────
+-- Then run, in order (both are safe to rerun):
+--   1. lib/supabase/profile_permissions.sql  (column-level write grants)
+--   2. lib/supabase/quota_hardening.sql      (atomic daily limits, Ask AI
+--      counters, user_news_feed unique constraint for older databases)
