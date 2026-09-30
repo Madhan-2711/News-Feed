@@ -315,19 +315,52 @@ export async function POST(request) {
     }
 
     // ── Step 7: Write user_news_feed ───────────────────────────────
-    const { error: feedErr } = await serviceClient
+    // Update rows for articles already in the feed and insert the rest,
+    // rather than upsert: deployed databases may lack the
+    // (user_id, article_id) unique constraint that ON CONFLICT requires.
+    const { data: existingRows, error: existingErr } = await serviceClient
       .from('user_news_feed')
-      .upsert(relevantEntries, { onConflict: 'user_id,article_id' });
-    if (feedErr) throw feedErr;
+      .select('id, article_id')
+      .eq('user_id', user.id);
+    if (existingErr) throw existingErr;
+
+    const keepArticleIds = new Set(relevantEntries.map(entry => entry.article_id));
+    const existingIdByArticle = {};
+    const staleRowIds = [];
+    for (const row of existingRows || []) {
+      // Old articles and duplicate rows for the same article are removed
+      if (!keepArticleIds.has(row.article_id) || existingIdByArticle[row.article_id]) {
+        staleRowIds.push(row.id);
+      } else {
+        existingIdByArticle[row.article_id] = row.id;
+      }
+    }
+
+    const newEntries = relevantEntries.filter(entry => !existingIdByArticle[entry.article_id]);
+    if (newEntries.length > 0) {
+      const { error: insertErr } = await serviceClient.from('user_news_feed').insert(newEntries);
+      if (insertErr) throw insertErr;
+    }
+
+    const updates = await Promise.all(
+      relevantEntries
+        .filter(entry => existingIdByArticle[entry.article_id])
+        .map(entry => serviceClient
+          .from('user_news_feed')
+          .update(entry)
+          .eq('id', existingIdByArticle[entry.article_id]))
+    );
+    const updateErr = updates.find(result => result.error)?.error;
+    if (updateErr) throw updateErr;
 
     // Remove old entries only after the replacement entries are safely stored.
-    const keepIds = relevantEntries.map(entry => entry.article_id);
-    const { error: staleErr } = await serviceClient
-      .from('user_news_feed')
-      .delete()
-      .eq('user_id', user.id)
-      .not('article_id', 'in', `(${keepIds.join(',')})`);
-    if (staleErr) throw staleErr;
+    if (staleRowIds.length > 0) {
+      const { error: staleErr } = await serviceClient
+        .from('user_news_feed')
+        .delete()
+        .in('id', staleRowIds);
+      if (staleErr) throw staleErr;
+    }
 
     // ── Step 8: Daily Brief (template-based) ──────────────────────
     try {
