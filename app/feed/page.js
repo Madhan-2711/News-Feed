@@ -6,6 +6,8 @@ import StatusBar from '../components/StatusBar';
 import TerminalButton from '../components/TerminalButton';
 import ArticleRow from '../components/ArticleRow';
 import ShineBorder from '../components/ShineBorder';
+import { FREE_DAILY_FETCHES } from '@/lib/limits';
+import { requestFeedRefresh, FEED_TIMEOUT_MESSAGE } from '@/lib/feedClient';
 
 // Group feed items by their cluster label
 function groupByCluster(items) {
@@ -74,22 +76,16 @@ export default function FeedPage() {
     setFetchError(null);
     setRateLimited(false);
     try {
-      const res = await fetch('/api/process-news', { method: 'POST' });
-
-      // Handle non-JSON responses (Vercel timeout/crash pages return HTML)
-      const contentType = res.headers.get('content-type') || '';
-      if (!contentType.includes('application/json')) {
+      const result = await requestFeedRefresh();
+      if (result.status === 'timeout') {
         // Pipeline may have written data before timing out — reload feed
         await loadFeed(user.id);
-        throw new Error('Server timed out, but your feed may have updated. Try refreshing.');
+        throw new Error(FEED_TIMEOUT_MESSAGE);
       }
-
-      const data = await res.json();
-      if (res.status === 429) {
+      if (result.status === 'rate-limited') {
         setRateLimited(true);
         return;
       }
-      if (!res.ok) throw new Error(data.error || 'Pipeline failed');
       await loadFeed(user.id);
     } catch (err) {
       console.error('Fetch failed:', err.message);
@@ -170,7 +166,7 @@ export default function FeedPage() {
               lineHeight: 1.6,
               margin: '0 0 0.85rem',
             }}>
-              Your 2 daily fetches have been used. Fresh articles will be ready tomorrow —
+              Your {FREE_DAILY_FETCHES} daily fetches have been used. Fresh articles will be ready tomorrow —
               the feed resets at midnight UTC.
             </p>
             <div style={{

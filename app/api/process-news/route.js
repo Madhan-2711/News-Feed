@@ -6,9 +6,18 @@ import {
   scoreArticle, clusterArticle, extractSummary,
   generateRationale, findBestInterest, buildBrief,
 } from '@/lib/scoring';
+import { consumeQuota, refundQuota } from '@/lib/quota';
+import { FREE_DAILY_FETCHES } from '@/lib/limits';
+import { sanitizeLang, sanitizeCountry } from '@/lib/locale';
 
-// Vercel Hobby max is 60s — enough since embeddings are skipped on Vercel
+// Vercel Hobby max is 60s — enough since embeddings are skipped on serverless hosts
 export const maxDuration = 60;
+
+// Local ONNX embeddings can't run in serverless functions. Netlify sets
+// AWS_LAMBDA_FUNCTION_NAME at runtime (NETLIFY is only guaranteed at build).
+const isServerless = Boolean(
+  process.env.VERCEL || process.env.NETLIFY || process.env.AWS_LAMBDA_FUNCTION_NAME
+);
 
 
 function getServiceClient() {
@@ -16,22 +25,6 @@ function getServiceClient() {
     process.env.NEXT_PUBLIC_SUPABASE_URL,
     process.env.SUPABASE_SERVICE_ROLE_KEY
   );
-}
-
-// ── Dedup by normalized title ──────────────────────────────────────
-function deduplicateArticles(items) {
-  const seen = new Set();
-  return items.filter((item) => {
-    const normalized = (item.title || '')
-      .toLowerCase()
-      .replace(/[^a-z0-9\s]/g, '')
-      .replace(/\s+/g, ' ')
-      .trim()
-      .slice(0, 60);
-    if (seen.has(normalized)) return false;
-    seen.add(normalized);
-    return true;
-  });
 }
 
 // ── Behavioral profile from click history ──────────────────────────
@@ -75,6 +68,10 @@ function buildBehaviorProfile(clicks) {
 
 // ── Main pipeline ──────────────────────────────────────────────────
 export async function POST(request) {
+  // Set once a fetch is spent; the finally block refunds it unless the run succeeds.
+  let refund = null;
+  let succeeded = false;
+
   try {
     const supabase = await createClient();
     const { data: { user }, error: authError } = await supabase.auth.getUser();
@@ -84,42 +81,38 @@ export async function POST(request) {
 
     const serviceClient = getServiceClient();
 
-    // Get user profile (premium flag + rate limit + interests)
+    // Get user profile (premium flag + interests)
     const { data: profile } = await supabase
       .from('profiles')
-      .select('interests, lang, country, daily_fetch_count, fetch_reset_date, is_premium')
+      .select('interests, lang, country, is_premium')
       .eq('id', user.id)
       .single();
 
     const isPremium = profile?.is_premium === true;
 
     // ── Rate limit ─────────────────────────────────────────────────
-    const DAILY_LIMIT = 2;
-    const todayUTC = new Date().toISOString().split('T')[0];
-
-    if (!isPremium) {
-      const lastResetDate = profile?.fetch_reset_date || null;
-      const fetchCount    = lastResetDate === todayUTC ? (profile?.daily_fetch_count || 0) : 0;
-      if (fetchCount >= DAILY_LIMIT) {
-        return NextResponse.json({
-          error: 'Daily limit reached',
-          message: `You've used both your daily fetches. Come back tomorrow for fresh news!`,
-          limit: DAILY_LIMIT,
-          used: fetchCount,
-          resetsAt: `${todayUTC}T23:59:59Z`,
-        }, { status: 429 });
-      }
+    // Spend the fetch before doing any work, atomically, so parallel
+    // requests can't all pass the check.
+    const quota = await consumeQuota(serviceClient, user.id, 'fetch');
+    if (!quota.allowed) {
+      const todayUTC = new Date().toISOString().split('T')[0];
+      return NextResponse.json({
+        error: 'Daily limit reached',
+        message: `You've used all ${FREE_DAILY_FETCHES} of your daily fetches. Come back tomorrow for fresh news!`,
+        limit: quota.limit,
+        used: quota.used,
+        resetsAt: `${todayUTC}T23:59:59Z`,
+      }, { status: 429 });
     }
-
-    const newCount     = (profile?.fetch_reset_date === todayUTC ? (profile?.daily_fetch_count || 0) : 0) + 1;
-    const newResetDate = todayUTC;
+    refund = () => refundQuota(serviceClient, user.id, 'fetch');
 
     const rawInterests = profile?.interests || {};
     const statedInterests = Object.fromEntries(
       Object.entries(rawInterests).filter(([k]) => k.startsWith('topic_'))
     );
-    const lang    = profile?.lang    || 'en';
-    const country = profile?.country || '';
+    // Profile values are user-editable; only pass known codes to news APIs.
+    const lang    = sanitizeLang(profile?.lang);
+    const country = sanitizeCountry(profile?.country);
 
     // ── Step 1: Click history for behavior profile ─────────────────
     let clickRows = [];
@@ -162,8 +155,8 @@ export async function POST(request) {
       return NextResponse.json({ error: 'No news articles found' }, { status: 404 });
     }
 
-    const deduped = deduplicateArticles(newsItems);
-    console.log(`[process-news] ${deduped.length} unique articles after dedup`);
+    // fetchFromAllSources already drops duplicate titles
+    const deduped = newsItems;
 
     // ── Step 3: Upsert to daily_cache ─────────────────────────────
     // Sliding window: 36h instead of 24h so yesterday evening's news survives
@@ -221,11 +214,9 @@ export async function POST(request) {
     let userEmbedding = null;
     const articleEmbeddings = {};
 
-    // Embeddings: only attempt on localhost (Vercel serverless can't run ONNX)
+    // Embeddings: only attempt locally (serverless hosts can't run ONNX)
     // Keyword + recency + source quality scoring works well without embeddings
-    const isVercel = !!process.env.VERCEL;
-
-    if (!isVercel) {
+    if (!isServerless) {
       try {
         const { embedText, embedBatch } = await import('@/lib/embeddings');
 
@@ -248,7 +239,7 @@ export async function POST(request) {
         console.warn('[embeddings] Unavailable — using keyword-only scoring:', embErr.message?.slice(0, 100));
       }
     } else {
-      console.log('[embeddings] Skipped on Vercel — using keyword + recency scoring');
+      console.log('[embeddings] Skipped on serverless host — using keyword + recency scoring');
     }
 
     // ── Step 5: Score & rank articles ─────────────────────────────
@@ -386,22 +377,21 @@ export async function POST(request) {
       console.error('Daily brief error:', briefErr.message);
     }
 
-    // ── Step 9: Persist rate-limit counters ────────────────────────
-    const { error: quotaErr } = await serviceClient
+    // ── Step 9: Record the fetch time ──────────────────────────────
+    // The quota was already spent before fetching. The feed is saved now, so a
+    // failure here is logged rather than failing (and refunding) the run.
+    const { error: lastFetchErr } = await serviceClient
       .from('profiles')
-      .update({
-        last_fetch:        new Date().toISOString(),
-        daily_fetch_count: newCount,
-        fetch_reset_date:  newResetDate,
-      })
+      .update({ last_fetch: new Date().toISOString() })
       .eq('id', user.id);
-    if (quotaErr) throw quotaErr;
+    if (lastFetchErr) console.error('last_fetch update error:', lastFetchErr.message);
 
     const sourceTally = deduped.reduce((acc, a) => {
       acc[a._sourceTag || 'unknown'] = (acc[a._sourceTag || 'unknown'] || 0) + 1;
       return acc;
     }, {});
 
+    succeeded = true;
     return NextResponse.json({
       success: true,
       articlesProcessed: relevantEntries.length,
@@ -411,7 +401,7 @@ export async function POST(request) {
       mode: 'interest-driven',
       quota: isPremium
         ? { isPremium: true, unlimited: true }
-        : { isPremium: false, used: newCount, remaining: Math.max(0, DAILY_LIMIT - newCount), limit: DAILY_LIMIT },
+        : { isPremium: false, used: quota.used, remaining: Math.max(0, quota.limit - quota.used), limit: quota.limit },
     });
 
   } catch (error) {
@@ -420,5 +410,8 @@ export async function POST(request) {
       { error: 'Pipeline failed', details: error.message },
       { status: 500 }
     );
+  } finally {
+    // Failed or empty runs don't count toward the daily limit.
+    if (refund && !succeeded) await refund();
   }
 }

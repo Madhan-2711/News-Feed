@@ -1,8 +1,17 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createClient as createServiceClient } from '@supabase/supabase-js';
-import { generateWithRetry } from '@/lib/gemini';
+import { generateWithRetry } from '@/lib/ai';
 import { buildQAPrompt } from '@/lib/openai/prompts';
+import { consumeQuota, refundQuota } from '@/lib/quota';
+import { FREE_DAILY_AI_QUESTIONS } from '@/lib/limits';
+
+function getServiceClient() {
+  return createServiceClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL,
+    process.env.SUPABASE_SERVICE_ROLE_KEY
+  );
+}
 
 // ── Firecrawl: scrape full article text ────────────────────────
 async function scrapeArticle(url) {
@@ -49,6 +58,10 @@ function cleanArticleText(markdown) {
 }
 
 export async function POST(request) {
+  // Set once a question is spent; refunded below unless an answer is returned.
+  let refund = null;
+  let succeeded = false;
+
   try {
     const supabase = await createClient();
     const { data: { user }, error: authError } = await supabase.auth.getUser();
@@ -76,6 +89,19 @@ export async function POST(request) {
       return NextResponse.json({ error: 'Article not found' }, { status: 404 });
     }
 
+    // Each question costs a Firecrawl scrape and an AI call, so free users
+    // get a daily cap. Spent only once the request is known to be valid.
+    const serviceClient = getServiceClient();
+    const quota = await consumeQuota(serviceClient, user.id, 'ai');
+    if (!quota.allowed) {
+      return NextResponse.json({
+        error: `You've used all ${FREE_DAILY_AI_QUESTIONS} of today's AI questions. They reset at midnight UTC.`,
+        limit: quota.limit,
+        used: quota.used,
+      }, { status: 429 });
+    }
+    refund = () => refundQuota(serviceClient, user.id, 'ai');
+
     let finalContext = article.full_text || '';
 
     // Lazy load full text: if the text is short (just the GNews snippet), scrape it now
@@ -85,10 +111,6 @@ export async function POST(request) {
         finalContext = scrapedText;
         
         // Save back to DB using service role to bypass RLS
-        const serviceClient = createServiceClient(
-          process.env.NEXT_PUBLIC_SUPABASE_URL,
-          process.env.SUPABASE_SERVICE_ROLE_KEY
-        );
         await serviceClient.from('daily_cache').update({ full_text: scrapedText }).eq('id', article_id);
       }
     }
@@ -105,13 +127,17 @@ export async function POST(request) {
       .replace(/^#{1,6}\s+/gm, '')
       .trim();
 
+    succeeded = Boolean(cleanAnswer);
     return NextResponse.json({ answer: cleanAnswer || 'No response generated.' });
   } catch (error) {
     console.error('Ask AI error:', error);
     const isRateLimit = error.status === 429;
     return NextResponse.json(
       { error: isRateLimit ? 'Rate limited — please wait a moment and try again.' : 'AI query failed' },
-      { status: 500 }
+      { status: isRateLimit ? 429 : 500 }
     );
+  } finally {
+    // Failed questions don't count toward the daily limit.
+    if (refund && !succeeded) await refund();
   }
 }

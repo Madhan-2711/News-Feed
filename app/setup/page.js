@@ -4,6 +4,7 @@ import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
 import StatusBar from '../components/StatusBar';
+import { LANGUAGES, COUNTRIES } from '@/lib/locale';
 
 const INTEREST_OPTIONS = [
   'Cricket', 'Fashion', 'Health', 'Fitness',
@@ -15,39 +16,6 @@ const INTEREST_OPTIONS = [
 ];
 
 const MAX_TOPICS = 5;
-
-const LANGUAGES = [
-  { code: 'en', name: 'English' },
-  { code: 'hi', name: 'Hindi' },
-  { code: 'ta', name: 'Tamil' },
-  { code: 'te', name: 'Telugu' },
-  { code: 'ml', name: 'Malayalam' },
-  { code: 'mr', name: 'Marathi' },
-  { code: 'bn', name: 'Bengali' },
-  { code: 'pa', name: 'Punjabi' },
-  { code: 'fr', name: 'French' },
-  { code: 'de', name: 'German' },
-  { code: 'es', name: 'Spanish' },
-  { code: 'ja', name: 'Japanese' },
-  { code: 'zh', name: 'Chinese' },
-  { code: 'ar', name: 'Arabic' },
-];
-
-const COUNTRIES = [
-  { code: '', name: 'International (All)' },
-  { code: 'in', name: 'India' },
-  { code: 'us', name: 'United States' },
-  { code: 'gb', name: 'United Kingdom' },
-  { code: 'au', name: 'Australia' },
-  { code: 'ca', name: 'Canada' },
-  { code: 'sg', name: 'Singapore' },
-  { code: 'de', name: 'Germany' },
-  { code: 'fr', name: 'France' },
-  { code: 'jp', name: 'Japan' },
-  { code: 'cn', name: 'China' },
-  { code: 'pk', name: 'Pakistan' },
-  { code: 'bd', name: 'Bangladesh' },
-];
 
 export default function SetupPage() {
   const router = useRouter();

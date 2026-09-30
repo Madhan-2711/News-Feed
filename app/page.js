@@ -6,6 +6,8 @@ import TerminalButton from './components/TerminalButton';
 import ArticleRow from './components/ArticleRow';
 import StatusBar from './components/StatusBar';
 import AnimatedShaderHero from './components/AnimatedShaderHero';
+import { FREE_DAILY_FETCHES } from '@/lib/limits';
+import { requestFeedRefresh, FEED_TIMEOUT_MESSAGE } from '@/lib/feedClient';
 
 const BOOT_LINES = [
   { text: 'Connecting services…', delay: 0 },
@@ -254,7 +256,7 @@ export default function LandingPage() {
           ? (profile.daily_fetch_count || 0) : 0;
         setForYouQuota(isPremium
           ? { isPremium: true, unlimited: true }
-          : { isPremium: false, used: fetchCount, remaining: Math.max(0, 2 - fetchCount), limit: 2 });
+          : { isPremium: false, used: fetchCount, remaining: Math.max(0, FREE_DAILY_FETCHES - fetchCount), limit: FREE_DAILY_FETCHES });
       }
 
       // 3. Auto-fetch only if not yet fetched today AND feed is empty
@@ -297,16 +299,18 @@ export default function LandingPage() {
     setForYouError(null);
     setForYouRateLimited(false);
     try {
-      const res = await fetch('/api/process-news', { method: 'POST' });
-      const data = await res.json();
-
-      if (res.status === 429) {
+      const result = await requestFeedRefresh();
+      if (result.status === 'timeout') {
+        // Pipeline may have written data before timing out — reload feed
+        if (user) await loadForYouFeed(user.id);
+        throw new Error(FEED_TIMEOUT_MESSAGE);
+      }
+      if (result.status === 'rate-limited') {
         setForYouRateLimited(true);
         return;
       }
 
-      if (!res.ok) throw new Error(data.error || 'Pipeline failed');
-
+      const { data } = result;
       setForYouSources(data.sources || null);
       setForYouMode(data.mode || null);
       setForYouBehaviorProfile(data.behaviorProfile || null);
@@ -574,7 +578,7 @@ export default function LandingPage() {
                     fontSize: '0.88rem', color: 'var(--fg-muted)',
                     lineHeight: 1.6, margin: '0 0 0.85rem',
                   }}>
-                    Your 2 daily fetches have been used. Fresh articles will be ready tomorrow —
+                    Your {FREE_DAILY_FETCHES} daily fetches have been used. Fresh articles will be ready tomorrow —
                     the feed resets at midnight UTC.
                   </p>
                   <div style={{
