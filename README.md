@@ -2,7 +2,7 @@ This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-
 
 ## Supabase profile permissions
 
-For an existing Supabase database, run [`lib/supabase/profile_permissions.sql`](lib/supabase/profile_permissions.sql) in the Supabase SQL Editor before deploying the setup-page update. It restricts signed-in users to editing their interests, language, and country; premium status and fetch counters remain server-managed. It also adds the article key-points column if needed. Deploying the app alone does not change database grants.
+For an existing Supabase database, run [`lib/supabase/profile_permissions.sql`](lib/supabase/profile_permissions.sql) in the Supabase SQL Editor. The script can be rerun if the earlier version blocked setup saves. It permits both the currently deployed setup-page upsert and the updated preference save while premium status and fetch counters remain server-managed. It also adds the article key-points column if needed. Deploying the app alone does not change database grants.
 
 ## Scheduled cleanup
 

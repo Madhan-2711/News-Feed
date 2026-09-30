@@ -64,9 +64,13 @@ CREATE POLICY "Users can read own profile"
 CREATE POLICY "Users can update own profile"
   ON profiles FOR UPDATE USING (auth.uid() = id);
 
--- Profiles are inserted by the signup trigger. Clients may edit preferences only.
+CREATE POLICY "Users can insert own profile"
+  ON profiles FOR INSERT WITH CHECK (auth.uid() = id);
+
+-- Permit the deployed setup page's upsert while restricting writable columns.
 REVOKE INSERT, UPDATE ON TABLE public.profiles FROM PUBLIC, anon, authenticated;
-GRANT UPDATE (interests, lang, country) ON TABLE public.profiles TO authenticated;
+GRANT INSERT (id, email, interests, lang, country) ON TABLE public.profiles TO authenticated;
+GRANT UPDATE (id, email, interests, lang, country) ON TABLE public.profiles TO authenticated;
 
 -- Daily cache policies (readable by all authenticated users)
 CREATE POLICY "Authenticated can read daily_cache"
