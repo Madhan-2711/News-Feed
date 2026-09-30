@@ -255,7 +255,13 @@ export async function POST(request) {
     // Preserve source and searched topic for scoring cached articles.
     const sourceMetaByUrl = {};
     deduped.forEach(d => {
-      if (d.link) sourceMetaByUrl[d.link] = { sourceTag: d._sourceTag, topic: d._topic };
+      if (d.link) {
+        sourceMetaByUrl[d.link] = {
+          sourceTag: d._sourceTag,
+          topic: d._topic,
+          topicVerified: d._viaSearch === true,
+        };
+      }
     });
 
     const feedEntries = dbArticles.map(article => {
@@ -264,6 +270,7 @@ export async function POST(request) {
         ...article,
         _sourceTag: sourceMeta.sourceTag || 'unknown',
         _topic: sourceMeta.topic || null,
+        _topicVerified: sourceMeta.topicVerified || false,
       };
       const cluster = clusterArticle(article.title, article.full_text, article.category);
       const score = scoreArticle(
@@ -275,7 +282,8 @@ export async function POST(request) {
         cluster,
       );
       const summary = extractSummary(article.full_text);
-      const bestInterest = enriched._topic || findBestInterest(article.title, article.full_text, fetchInterests);
+      const bestInterest = findBestInterest(article.title, article.full_text, fetchInterests) ||
+        (enriched._topicVerified ? enriched._topic : null);
       const rationale = generateRationale(bestInterest, score);
 
       return {
