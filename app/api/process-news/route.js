@@ -252,12 +252,26 @@ export async function POST(request) {
     }
 
     // ── Step 5: Score & rank articles ─────────────────────────────
-    // Attach source tag from deduped items for source quality scoring
-    const sourceTagByUrl = {};
-    deduped.forEach(d => { if (d.link) sourceTagByUrl[d.link] = d._sourceTag; });
+    // Preserve source and searched topic for scoring cached articles.
+    const sourceMetaByUrl = {};
+    deduped.forEach(d => {
+      if (d.link) {
+        sourceMetaByUrl[d.link] = {
+          sourceTag: d._sourceTag,
+          topic: d._topic,
+          topicVerified: d._viaSearch === true,
+        };
+      }
+    });
 
     const feedEntries = dbArticles.map(article => {
-      const enriched = { ...article, _sourceTag: sourceTagByUrl[article.source_url] || 'unknown' };
+      const sourceMeta = sourceMetaByUrl[article.source_url] || {};
+      const enriched = {
+        ...article,
+        _sourceTag: sourceMeta.sourceTag || 'unknown',
+        _topic: sourceMeta.topic || null,
+        _topicVerified: sourceMeta.topicVerified || false,
+      };
       const cluster = clusterArticle(article.title, article.full_text, article.category);
       const score = scoreArticle(
         enriched,
@@ -268,7 +282,8 @@ export async function POST(request) {
         cluster,
       );
       const summary = extractSummary(article.full_text);
-      const bestInterest = findBestInterest(article.title, article.full_text, fetchInterests);
+      const bestInterest = findBestInterest(article.title, article.full_text, fetchInterests) ||
+        (enriched._topicVerified ? enriched._topic : null);
       const rationale = generateRationale(bestInterest, score);
 
       return {
@@ -295,14 +310,24 @@ export async function POST(request) {
       `(scores: ${relevantEntries[0]?.score?.toFixed(2)} → ${relevantEntries[relevantEntries.length - 1]?.score?.toFixed(2)})`
     );
 
-    // ── Step 7: Write user_news_feed ───────────────────────────────
-    if (relevantEntries.length > 0) {
-      await serviceClient.from('user_news_feed').delete().eq('user_id', user.id);
-      const { error: feedErr } = await serviceClient
-        .from('user_news_feed')
-        .insert(relevantEntries);
-      if (feedErr) console.error('Feed insert error:', feedErr.message);
+    if (relevantEntries.length === 0) {
+      return NextResponse.json({ error: 'No relevant articles found' }, { status: 404 });
     }
+
+    // ── Step 7: Write user_news_feed ───────────────────────────────
+    const { error: feedErr } = await serviceClient
+      .from('user_news_feed')
+      .upsert(relevantEntries, { onConflict: 'user_id,article_id' });
+    if (feedErr) throw feedErr;
+
+    // Remove old entries only after the replacement entries are safely stored.
+    const keepIds = relevantEntries.map(entry => entry.article_id);
+    const { error: staleErr } = await serviceClient
+      .from('user_news_feed')
+      .delete()
+      .eq('user_id', user.id)
+      .not('article_id', 'in', `(${keepIds.join(',')})`);
+    if (staleErr) throw staleErr;
 
     // ── Step 8: Daily Brief (template-based) ──────────────────────
     try {
@@ -329,7 +354,7 @@ export async function POST(request) {
     }
 
     // ── Step 9: Persist rate-limit counters ────────────────────────
-    await serviceClient
+    const { error: quotaErr } = await serviceClient
       .from('profiles')
       .update({
         last_fetch:        new Date().toISOString(),
@@ -337,6 +362,7 @@ export async function POST(request) {
         fetch_reset_date:  newResetDate,
       })
       .eq('id', user.id);
+    if (quotaErr) throw quotaErr;
 
     const sourceTally = deduped.reduce((acc, a) => {
       acc[a._sourceTag || 'unknown'] = (acc[a._sourceTag || 'unknown'] || 0) + 1;

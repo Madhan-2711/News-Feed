@@ -1,10 +1,6 @@
 {
   "crons": [
     {
-      "path": "/api/process-news",
-      "schedule": "0 6 * * *"
-    },
-    {
       "path": "/api/cleanup",
       "schedule": "0 4 * * *"
     }

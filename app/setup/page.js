@@ -117,7 +117,8 @@ export default function SetupPage() {
       const interestsObj = {};
       newSelected.forEach((s, i) => { interestsObj[`topic_${i}`] = s; });
       interestsObj.__custom = newCustom;
-      await supabase.from('profiles').upsert({ id: user.id, email: user.email, interests: interestsObj }, { onConflict: 'id' });
+      const { error } = await supabase.from('profiles').update({ interests: interestsObj }).eq('id', user.id);
+      if (error) console.error('[Setup] Remove custom interest failed:', error);
     }
   };
 
@@ -151,7 +152,8 @@ export default function SetupPage() {
       const interestsObj = {};
       newSelected.forEach((s, i) => { interestsObj[`topic_${i}`] = s; });
       interestsObj.__custom = newCustom; // always persist all custom interests
-      await supabase.from('profiles').upsert({ id: user.id, email: user.email, interests: interestsObj }, { onConflict: 'id' });
+      const { error } = await supabase.from('profiles').update({ interests: interestsObj }).eq('id', user.id);
+      if (error) console.error('[Setup] Add custom interest failed:', error);
     }
   };
 
@@ -180,13 +182,12 @@ export default function SetupPage() {
       selected.forEach((s, i) => { interestsObj[`topic_${i}`] = s; });
       interestsObj.__custom = customInterests; // always persist custom interests even if deselected
 
-      console.log('[Setup] Saving profile:', { userId: user.id, interests: interestsObj, lang, country });
-
-      const { error, data } = await supabase
+      const { error } = await supabase
         .from('profiles')
-        .upsert({ id: user.id, email: user.email, interests: interestsObj, lang, country }, { onConflict: 'id' });
-
-      console.log('[Setup] Supabase result:', { error, data });
+        .update({ interests: interestsObj, lang, country })
+        .eq('id', user.id)
+        .select('id')
+        .single();
 
       clearInterval(interval);
       if (error) throw error;
