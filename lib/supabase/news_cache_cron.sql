@@ -17,6 +17,9 @@ BEGIN
     RAISE EXCEPTION 'Replace YOUR_SITE_URL and YOUR_CRON_SECRET before running';
   END IF;
   v_site := rtrim(v_site, '/');
+  IF v_site !~* '^https?://' THEN
+    v_site := 'https://' || v_site;
+  END IF;
 
   IF EXISTS (SELECT 1 FROM vault.secrets WHERE name = 'news_site_url') THEN
     PERFORM vault.update_secret((SELECT id FROM vault.secrets WHERE name = 'news_site_url'), v_site);
