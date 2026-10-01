@@ -1,66 +1,63 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { scoreArticle, findBestInterest, generateRationale, clusterArticle } from '../lib/scoring.js';
+import { scoreArticle, matchStrength, generateRationale, clusterArticle, MATCH } from '../lib/scoring.js';
 
-const freshArticle = {
-  title: 'A new local headline',
-  full_text: 'A short report with no sports references.',
-  published_at: new Date().toISOString(),
-  _sourceTag: 'gnews',
-};
+const now = new Date().toISOString();
+const article = (title, full_text = '', extra = {}) => ({ title, full_text, published_at: now, source_tag: 'googlenews', ...extra });
 
-test('serverless scoring excludes an unrelated article', () => {
-  assert.equal(scoreArticle(freshArticle, null, null, ['Cricket']), 0);
+test('an article matching none of the interests scores 0', () => {
+  const result = scoreArticle(article('High Court stays Vaze bail', 'NIA appeal in October'), ['Gaming', 'Cricket']);
+  assert.equal(result.score, 0);
+  assert.equal(result.interest, null);
 });
 
-test('serverless scoring keeps articles matching a stated interest', () => {
-  const article = { ...freshArticle, title: 'Cricket match begins today' };
-  assert.ok(scoreArticle(article, null, null, ['Cricket']) >= 0.3);
+test('a headline match outranks a description-only match', () => {
+  const inTitle = scoreArticle(article('Cricket: India win the second ODI'), ['Cricket']);
+  const inBody = scoreArticle(article('Weekend round-up', 'The cricket season starts next week'), ['Cricket']);
+  assert.equal(inTitle.strength, MATCH.title);
+  assert.equal(inBody.strength, MATCH.description);
+  assert.ok(inTitle.score > inBody.score);
 });
 
-test('verified search topic is sufficient when a headline uses different wording', () => {
-  const article = { ...freshArticle, _topic: 'Cricket', _topicVerified: true };
-  assert.ok(scoreArticle(article, null, null, ['Cricket']) >= 0.3);
+test('a cached search tag counts as a weak match', () => {
+  const result = scoreArticle(article('Asian Games: twin golds for Sahil'), ['Sports'], {
+    topicRelevance: { Sports: MATCH.searchOnly },
+  });
+  assert.equal(result.strength, MATCH.searchOnly);
+  assert.ok(result.score > 0);
 });
 
-test('unverified topic tag from a headline fallback does not count as a match', () => {
-  const article = {
-    ...freshArticle,
-    title: 'High Court stays Vaze bail; NIA appeal to come up in October',
-    _topic: 'Gaming',
-    _topicVerified: false,
-  };
-  assert.equal(scoreArticle(article, null, null, ['Gaming', 'Cricket']), 0);
+test('fresher articles score higher, all else equal', () => {
+  const old = new Date(Date.now() - 30 * 3600000).toISOString();
+  const fresh = scoreArticle(article('Cricket final tonight'), ['Cricket']);
+  const stale = scoreArticle(article('Cricket final tonight', '', { published_at: old }), ['Cricket']);
+  assert.ok(fresh.score > stale.score);
 });
 
-test('weak embedding similarity alone does not pass an unrelated article', () => {
-  const article = {
-    ...freshArticle,
-    title: "'I grabbed the terrorist': Flydubai passenger tells Netanyahu how he subdued pilot",
-  };
-  const user = [1, 0];
-  const weak = [0.2, Math.sqrt(1 - 0.04)];
-  assert.equal(scoreArticle(article, user, weak, ['Gaming']), 0);
+test('scores are spread out, not flat', () => {
+  const scores = [
+    scoreArticle(article('Cricket final tonight'), ['Cricket']).score,
+    scoreArticle(article('Weekend round-up', 'cricket news inside'), ['Cricket']).score,
+    scoreArticle(article('Asian Games golds'), ['Cricket'], { topicRelevance: { Cricket: MATCH.searchOnly } }).score,
+  ];
+  assert.equal(new Set(scores.map(s => s.toFixed(2))).size, 3);
 });
 
-test('expanded keywords match predefined interests', () => {
-  const article = { ...freshArticle, title: 'Nintendo announces new Switch release date' };
-  assert.ok(scoreArticle(article, null, null, ['Gaming']) >= 0.3);
-  assert.equal(findBestInterest(article.title, '', ['Cricket', 'Gaming']), 'Gaming');
-});
-
-test('short-word interests like AI & ML can match', () => {
-  assert.equal(findBestInterest('OpenAI ships a new LLM', '', ['AI & ML']), 'AI & ML');
-});
-
-test('rationale never names an interest the article does not match', () => {
-  const title = 'Screen Portable Monitor for Productivity Anywhere';
-  assert.equal(findBestInterest(title, '', ['Gaming', 'Cricket']), null);
-  assert.equal(generateRationale(null, 0.4), 'Similar to stories you follow.');
+test('expanded keywords match preset interests', () => {
+  assert.equal(matchStrength('Nintendo announces new Switch release date', '', 'Gaming'), MATCH.title);
+  assert.equal(matchStrength('OpenAI ships a new LLM', '', 'AI & ML'), MATCH.title);
 });
 
 test('a specific interest is preferred over the general News interest', () => {
-  assert.equal(findBestInterest('Cricket news: India win', '', ['News', 'Cricket']), 'Cricket');
+  const result = scoreArticle(article('Cricket news: India win'), ['News', 'Cricket']);
+  assert.equal(result.interest, 'Cricket');
+});
+
+test('rationale wording follows how the article matched', () => {
+  assert.equal(generateRationale('Cricket', MATCH.title), 'Highly relevant to your interest in Cricket.');
+  assert.equal(generateRationale('Cricket', MATCH.description), 'Matches your interest in Cricket.');
+  assert.equal(generateRationale('Cricket', MATCH.searchOnly), 'Related to Cricket.');
+  assert.equal(generateRationale(null, 0), 'Similar to stories you follow.');
 });
 
 test('clusterArticle checks sports before tech', () => {
@@ -73,4 +70,17 @@ test('clusterArticle short keywords need word boundaries', () => {
   assert.equal(clusterArticle('Minister said the plan is on track', '', 'general'), 'Politics');
   assert.equal(clusterArticle('Local bakery wins award', '', 'general'), 'General');
   assert.equal(clusterArticle('Local bakery wins award', '', 'food'), 'Food');
+});
+
+test('clusterArticle has travel, wildlife and transport groups', () => {
+  assert.equal(clusterArticle('Wild elephant menace: night travel restricted', ''), 'Wildlife');
+  assert.equal(clusterArticle('Darjeeling toy train among top tourist destinations', ''), 'Travel');
+  assert.equal(clusterArticle('Mangaluru-Goa Vande Bharat to be extended', ''), 'Transport');
+});
+
+test('keywords match whole words, not inside other words', () => {
+  assert.equal(matchStrength('Vendor programme for women entrepreneurs in Visakhapatnam', '', 'Travel'), 0);
+  assert.equal(matchStrength('Travelodge failed sex assault victim', '', 'Travel'), 0);
+  assert.equal(matchStrength('New visas for students announced', '', 'Travel'), MATCH.title);
+  assert.equal(matchStrength('Jaffna flight unlocks tourism potential', '', 'Travel'), MATCH.title);
 });
