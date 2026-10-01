@@ -53,3 +53,11 @@ test('a search or feed section adds only a weak signal', () => {
   const result = classifyArticle({ title: 'Asian Games: twin golds', _feedTopics: ['sports'] }, ['Sports', 'Travel']);
   assert.deepEqual(result, { Sports: MATCH.searchOnly });
 });
+
+test('dedup also collapses different titles that share one URL', () => {
+  const a = { title: 'Live: India vs England, 2nd ODI', link: 'https://x.com/live', _searchedTopics: ['Cricket'] };
+  const b = { title: 'India vs England live score updates', link: 'https://x.com/live', _searchedTopics: ['Sports'] };
+  const result = dedupArticles([a, b]);
+  assert.equal(result.length, 1);
+  assert.deepEqual(result[0]._searchedTopics.sort(), ['Cricket', 'Sports']);
+});

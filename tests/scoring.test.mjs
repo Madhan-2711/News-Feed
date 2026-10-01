@@ -77,3 +77,10 @@ test('clusterArticle has travel, wildlife and transport groups', () => {
   assert.equal(clusterArticle('Darjeeling toy train among top tourist destinations', ''), 'Travel');
   assert.equal(clusterArticle('Mangaluru-Goa Vande Bharat to be extended', ''), 'Transport');
 });
+
+test('keywords match whole words, not inside other words', () => {
+  assert.equal(matchStrength('Vendor programme for women entrepreneurs in Visakhapatnam', '', 'Travel'), 0);
+  assert.equal(matchStrength('Travelodge failed sex assault victim', '', 'Travel'), 0);
+  assert.equal(matchStrength('New visas for students announced', '', 'Travel'), MATCH.title);
+  assert.equal(matchStrength('Jaffna flight unlocks tourism potential', '', 'Travel'), MATCH.title);
+});

@@ -3,7 +3,7 @@ import { createClient } from '@/lib/supabase/server';
 import { createClient as createServiceClient } from '@supabase/supabase-js';
 import { buildBrief } from '@/lib/scoring';
 import { rankFeed } from '@/lib/rank';
-import { registerTopics, loadCandidates, fillThinTopics } from '@/lib/feedCandidates';
+import { registerTopics, loadFeedCandidates, fillThinTopics } from '@/lib/feedCandidates';
 import { consumeQuota, refundQuota } from '@/lib/quota';
 import { FREE_DAILY_FETCHES } from '@/lib/limits';
 import { sanitizeLang, sanitizeCountry } from '@/lib/locale';
@@ -188,12 +188,12 @@ export async function POST() {
     // ── Step 1: Topics → cache candidates ──────────────────────────
     // Registering marks the topics as wanted, so the hourly job keeps them fresh.
     const topicRows = await registerTopics(serviceClient, interests, country, lang);
-    let { candidates, countByKey } = await loadCandidates(serviceClient, topicRows);
+    let { candidates, countByKey } = await loadFeedCandidates(serviceClient, topicRows);
 
     // Topics the cache doesn't cover yet (new or niche keywords) are
     // searched now, including keyed APIs, then read back from the cache.
     const searched = await fillThinTopics(serviceClient, topicRows, countByKey);
-    if (searched.length) ({ candidates, countByKey } = await loadCandidates(serviceClient, topicRows));
+    if (searched.length) ({ candidates, countByKey } = await loadFeedCandidates(serviceClient, topicRows));
     console.log(`[process-news] ${candidates.length} candidates`, countByKey);
 
     // ── Step 2: Rank ───────────────────────────────────────────────
