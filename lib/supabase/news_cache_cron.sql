@@ -16,6 +16,11 @@ BEGIN
   IF v_site LIKE 'YOUR_%' OR v_secret LIKE 'YOUR_%' THEN
     RAISE EXCEPTION 'Replace YOUR_SITE_URL and YOUR_CRON_SECRET before running';
   END IF;
+  -- Without pg_net the jobs would be scheduled but fail on every run
+  IF NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_cron')
+     OR NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_net') THEN
+    RAISE EXCEPTION 'Enable both pg_cron and pg_net (Database → Extensions) before running';
+  END IF;
   v_site := rtrim(v_site, '/');
   IF v_site !~* '^https?://' THEN
     v_site := 'https://' || v_site;
