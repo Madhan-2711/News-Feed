@@ -61,3 +61,16 @@ test('dedup also collapses different titles that share one URL', () => {
   assert.equal(result.length, 1);
   assert.deepEqual(result[0]._searchedTopics.sort(), ['Cricket', 'Sports']);
 });
+
+test('wire-service slugs are not headlines', async () => {
+  const { isJunkTitle } = await import('../lib/collect.js');
+  assert.equal(isJunkTitle('FOOTBALL-NFL/'), true);
+  assert.equal(isJunkTitle('Browns beat Steelers'), false);
+});
+
+test('primary terms suit APIs without OR support', async () => {
+  const { primaryTerm } = await import('../lib/topics.js');
+  assert.equal(primaryTerm('AI & ML'), 'artificial intelligence');
+  assert.equal(primaryTerm('Football'), 'football');
+  assert.equal(primaryTerm('electric vehicles'), 'electric vehicles');
+});

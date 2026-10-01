@@ -1,15 +1,27 @@
 import { NextResponse } from 'next/server';
+import { latestFromFeeds } from '@/lib/sources/rss';
 import { topStories } from '@/lib/sources/googlenews';
 
-// Public home-page headlines from Google News top stories (free, no key).
-// The upstream feed is cached for 30 minutes per edition.
+// Public home-page headlines from publisher RSS feeds (with images).
+// Google News top stories are only a fallback if the feeds fail.
+// Upstream feeds are cached for 30 minutes.
 const CACHE_SECONDS = 1800;
 
 const EDITIONS = {
-  national:      { country: 'in', lang: 'en' },
-  international: { country: '',   lang: 'en' },
-  trending:      { country: '',   lang: 'en' },
+  national: {
+    feeds: [
+      'https://timesofindia.indiatimes.com/rssfeedstopstories.cms',
+      'https://feeds.feedburner.com/ndtvnews-top-stories',
+      'https://www.thehindu.com/news/national/feeder/default.rss',
+    ],
+    fallback: { country: 'in', lang: 'en' },
+  },
+  international: {
+    feeds: ['https://feeds.bbci.co.uk/news/world/rss.xml'],
+    fallback: { country: '', lang: 'en' },
+  },
 };
+EDITIONS.trending = EDITIONS.international;
 
 function mapArticles(items) {
   return items.slice(0, 10).map((item, index) => ({
@@ -26,9 +38,12 @@ function mapArticles(items) {
 export async function GET(request) {
   const { searchParams } = new URL(request.url);
   const type = EDITIONS[searchParams.get('type')] ? searchParams.get('type') : 'trending';
+  const edition = EDITIONS[type];
 
   try {
-    const articles = mapArticles(await topStories({ ...EDITIONS[type], revalidate: CACHE_SECONDS }));
+    let items = await latestFromFeeds(edition.feeds, { revalidate: CACHE_SECONDS });
+    if (!items.length) items = await topStories({ ...edition.fallback, revalidate: CACHE_SECONDS });
+    const articles = mapArticles(items);
     return NextResponse.json({ articles, total: articles.length, type });
   } catch (error) {
     console.error(`Trending [${type}] fetch error:`, error);
