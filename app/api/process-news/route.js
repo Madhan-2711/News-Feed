@@ -1,24 +1,20 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createClient as createServiceClient } from '@supabase/supabase-js';
-import { fetchFromAllSources } from '@/lib/sources/index';
-import {
-  scoreArticle, clusterArticle, extractSummary,
-  generateRationale, findBestInterest, buildBrief,
-} from '@/lib/scoring';
+import { buildBrief } from '@/lib/scoring';
+import { rankFeed } from '@/lib/rank';
+import { registerTopics, loadCandidates, fillThinTopics } from '@/lib/feedCandidates';
 import { consumeQuota, refundQuota } from '@/lib/quota';
 import { FREE_DAILY_FETCHES } from '@/lib/limits';
 import { sanitizeLang, sanitizeCountry } from '@/lib/locale';
 
-// Vercel Hobby max is 60s — enough since embeddings are skipped on serverless hosts
+// Reads from the shared news cache, so most fetches take a few seconds.
+// Topics the cache doesn't cover yet are searched on demand (bounded),
+// which keeps the worst case well under the 60s function limit.
 export const maxDuration = 60;
 
-// Local ONNX embeddings can't run in serverless functions. Netlify sets
-// AWS_LAMBDA_FUNCTION_NAME at runtime (NETLIFY is only guaranteed at build).
-const isServerless = Boolean(
-  process.env.VERCEL || process.env.NETLIFY || process.env.AWS_LAMBDA_FUNCTION_NAME
-);
-
+const FEED_SIZE = 20;
+const READ_HIDDEN_FOR_DAYS = 7;
 
 function getServiceClient() {
   return createServiceClient(
@@ -66,8 +62,83 @@ function buildBehaviorProfile(clicks) {
   };
 }
 
+// Recent clicks: cluster history for the behaviour boost, and the ids of
+// articles the user has already opened (hidden from the new feed).
+async function loadClickHistory(db, userId) {
+  try {
+    const { data: clicks } = await db
+      .from('article_clicks')
+      .select('clicked_at, daily_cache ( title, category ), article_id')
+      .eq('user_id', userId)
+      .order('clicked_at', { ascending: false })
+      .limit(30);
+    if (!clicks?.length) return { clickRows: [], readIds: new Set() };
+
+    const articleIds = clicks.map(c => c.article_id).filter(Boolean);
+    const { data: feedRows } = await db
+      .from('user_news_feed')
+      .select('article_id, cluster')
+      .eq('user_id', userId)
+      .in('article_id', articleIds);
+
+    const clusterById = {};
+    (feedRows || []).forEach(r => { clusterById[r.article_id] = r.cluster; });
+
+    const hideSince = Date.now() - READ_HIDDEN_FOR_DAYS * 86400000;
+    return {
+      clickRows: clicks.map(c => ({ ...c, user_news_feed: { cluster: clusterById[c.article_id] || null } })),
+      readIds: new Set(clicks.filter(c => new Date(c.clicked_at).getTime() > hideSince).map(c => c.article_id)),
+    };
+  } catch {
+    return { clickRows: [], readIds: new Set() };
+  }
+}
+
+// Save the feed. Updates rows for articles already in it and inserts the
+// rest rather than upserting, so it works with or without the
+// (user_id, article_id) unique constraint.
+async function saveFeed(db, userId, entries) {
+  const { data: existingRows, error: existingErr } = await db
+    .from('user_news_feed')
+    .select('id, article_id')
+    .eq('user_id', userId);
+  if (existingErr) throw existingErr;
+
+  const keepArticleIds = new Set(entries.map(entry => entry.article_id));
+  const existingIdByArticle = {};
+  const staleRowIds = [];
+  for (const row of existingRows || []) {
+    // Old articles and duplicate rows for the same article are removed
+    if (!keepArticleIds.has(row.article_id) || existingIdByArticle[row.article_id]) {
+      staleRowIds.push(row.id);
+    } else {
+      existingIdByArticle[row.article_id] = row.id;
+    }
+  }
+
+  const newEntries = entries.filter(entry => !existingIdByArticle[entry.article_id]);
+  if (newEntries.length > 0) {
+    const { error: insertErr } = await db.from('user_news_feed').insert(newEntries);
+    if (insertErr) throw insertErr;
+  }
+
+  const updates = await Promise.all(
+    entries
+      .filter(entry => existingIdByArticle[entry.article_id])
+      .map(entry => db.from('user_news_feed').update(entry).eq('id', existingIdByArticle[entry.article_id]))
+  );
+  const updateErr = updates.find(result => result.error)?.error;
+  if (updateErr) throw updateErr;
+
+  // Remove old entries only after the replacement entries are safely stored.
+  if (staleRowIds.length > 0) {
+    const { error: staleErr } = await db.from('user_news_feed').delete().in('id', staleRowIds);
+    if (staleErr) throw staleErr;
+  }
+}
+
 // ── Main pipeline ──────────────────────────────────────────────────
-export async function POST(request) {
+export async function POST() {
   // Set once a fetch is spent; the finally block refunds it unless the run succeeds.
   let refund = null;
   let succeeded = false;
@@ -81,13 +152,11 @@ export async function POST(request) {
 
     const serviceClient = getServiceClient();
 
-    // Get user profile (premium flag + interests)
     const { data: profile } = await supabase
       .from('profiles')
       .select('interests, lang, country, is_premium')
       .eq('id', user.id)
       .single();
-
     const isPremium = profile?.is_premium === true;
 
     // ── Rate limit ─────────────────────────────────────────────────
@@ -106,278 +175,67 @@ export async function POST(request) {
     }
     refund = () => refundQuota(serviceClient, user.id, 'fetch');
 
-    const rawInterests = profile?.interests || {};
-    const statedInterests = Object.fromEntries(
-      Object.entries(rawInterests).filter(([k]) => k.startsWith('topic_'))
-    );
-    // Profile values are user-editable; only pass known codes to news APIs.
+    const interests = Object.entries(profile?.interests || {})
+      .filter(([k, v]) => k.startsWith('topic_') && v)
+      .map(([, v]) => v);
+    if (!interests.length) {
+      return NextResponse.json({ error: 'Pick at least one topic first' }, { status: 400 });
+    }
+    // Profile values are user-editable; only use known codes.
     const lang    = sanitizeLang(profile?.lang);
     const country = sanitizeCountry(profile?.country);
 
-    // ── Step 1: Click history for behavior profile ─────────────────
-    let clickRows = [];
-    try {
-      const { data: clicks } = await serviceClient
-        .from('article_clicks')
-        .select('clicked_at, daily_cache ( title, category ), article_id')
-        .eq('user_id', user.id)
-        .order('clicked_at', { ascending: false })
-        .limit(30);
+    // ── Step 1: Topics → cache candidates ──────────────────────────
+    // Registering marks the topics as wanted, so the hourly job keeps them fresh.
+    const topicRows = await registerTopics(serviceClient, interests, country, lang);
+    let { candidates, countByKey } = await loadCandidates(serviceClient, topicRows);
 
-      if (clicks?.length > 0) {
-        const articleIds = clicks.map(c => c.article_id).filter(Boolean);
-        const { data: feedRows } = await serviceClient
-          .from('user_news_feed')
-          .select('article_id, cluster')
-          .eq('user_id', user.id)
-          .in('article_id', articleIds);
+    // Topics the cache doesn't cover yet (new or niche keywords) are
+    // searched now, including keyed APIs, then read back from the cache.
+    const searched = await fillThinTopics(serviceClient, topicRows, countByKey);
+    if (searched.length) ({ candidates, countByKey } = await loadCandidates(serviceClient, topicRows));
+    console.log(`[process-news] ${candidates.length} candidates`, countByKey);
 
-        const clusterById = {};
-        (feedRows || []).forEach(r => { clusterById[r.article_id] = r.cluster; });
-        clickRows = clicks.map(c => ({
-          ...c,
-          user_news_feed: { cluster: clusterById[c.article_id] || null },
-        }));
-      }
-    } catch { /* article_clicks may not exist yet */ }
-
+    // ── Step 2: Rank ───────────────────────────────────────────────
+    const { clickRows, readIds } = await loadClickHistory(serviceClient, user.id);
     const behavior = buildBehaviorProfile(clickRows);
-
-    // Always fetch by stated interests — behavior only adjusts scoring weight (5% boost)
-    // This prevents old click history from leaking into the rationale and topic sources
-    const fetchInterests = Object.values(statedInterests).filter(Boolean);
-
-    console.log(`[process-news] Fetch interests (stated):`, JSON.stringify(fetchInterests));
-
-    // ── Step 2: Fetch from all sources ────────────────────────────
-    const newsItems = await fetchFromAllSources(fetchInterests, lang, country);
-    if (!newsItems.length) {
-      return NextResponse.json({ error: 'No news articles found' }, { status: 404 });
-    }
-
-    // fetchFromAllSources already drops duplicate titles
-    const deduped = newsItems;
-
-    // ── Step 3: Upsert to daily_cache ─────────────────────────────
-    // Sliding window: 36h instead of 24h so yesterday evening's news survives
-    const urls   = deduped.map(i => i.link).filter(Boolean);
-    const cutoff = new Date(Date.now() - 36 * 60 * 60 * 1000).toISOString();
-
-    const { data: cachedRows } = await serviceClient
-      .from('daily_cache')
-      .select('id, title, full_text, source_url, image_url, source, category, published_at')
-      .in('source_url', urls)
-      .gte('fetched_at', cutoff);
-
-    const cachedMap = {};
-    (cachedRows || []).forEach(r => { cachedMap[r.source_url] = r; });
-
-    const newItems = deduped.filter(i => i.link && !cachedMap[i.link]);
-    const articles = deduped.filter(i => i.link && cachedMap[i.link]).map(i => cachedMap[i.link]);
-
-    if (newItems.length > 0) {
-      const insertData = newItems.map(item => ({
-        title:        item.title || 'Untitled',
-        full_text:    item.content || item.description || '',
-        source:       item.source_name || 'Unknown',
-        source_url:   item.link,
-        image_url:    item.image_url || null,
-        is_global:    false,
-        category:     item.category || 'general',
-        published_at: item.publishedAt || new Date().toISOString(),
-        fetched_at:   new Date().toISOString(),
-      }));
-
-      const { data: inserted } = await serviceClient
-        .from('daily_cache')
-        .upsert(insertData, { onConflict: 'source_url' })
-        .select('id, title, full_text, source_url, image_url, source, category, published_at');
-
-      if (inserted) articles.push(...inserted);
-    }
-
-    if (!articles.length) {
-      return NextResponse.json({ error: 'No articles could be processed' }, { status: 500 });
-    }
-
-    // Deduplicate by DB id
-    const dbArticlesById = Object.fromEntries(
-      articles.filter(a => a.id).map(a => [a.id, a])
-    );
-    const dbArticles = Object.values(dbArticlesById);
-
-    console.log(`[process-news] ${dbArticles.length} articles ready for scoring`);
-
-    // ── Step 4: Generate embeddings ───────────────────────────────
-    // Build user interest embedding
-    const interestText = fetchInterests.join(', ');
-    let userEmbedding = null;
-    const articleEmbeddings = {};
-
-    // Embeddings: only attempt locally (serverless hosts can't run ONNX)
-    // Keyword + recency + source quality scoring works well without embeddings
-    if (!isServerless) {
-      try {
-        const { embedText, embedBatch } = await import('@/lib/embeddings');
-
-        console.log('[embeddings] Generating user interest embedding...');
-        userEmbedding = await embedText(interestText);
-
-        const textsToEmbed = dbArticles.map(a =>
-          `${a.title}. ${(a.full_text || '').slice(0, 500)}`
-        );
-
-        console.log(`[embeddings] Generating embeddings for ${textsToEmbed.length} articles...`);
-        const startTime = Date.now();
-        const embeddings = await embedBatch(textsToEmbed);
-        console.log(`[embeddings] Done in ${((Date.now() - startTime) / 1000).toFixed(1)}s`);
-
-        dbArticles.forEach((a, i) => {
-          articleEmbeddings[a.id] = embeddings[i];
-        });
-      } catch (embErr) {
-        console.warn('[embeddings] Unavailable — using keyword-only scoring:', embErr.message?.slice(0, 100));
-      }
-    } else {
-      console.log('[embeddings] Skipped on serverless host — using keyword + recency scoring');
-    }
-
-    // ── Step 5: Score & rank articles ─────────────────────────────
-    // Preserve source and searched topic for scoring cached articles.
-    const sourceMetaByUrl = {};
-    deduped.forEach(d => {
-      if (d.link) {
-        sourceMetaByUrl[d.link] = {
-          sourceTag: d._sourceTag,
-          topic: d._topic,
-          topicVerified: d._viaSearch === true,
-        };
-      }
+    const ranked = rankFeed(candidates, interests, {
+      readIds,
+      behaviorClusters: behavior.topClusters,
+      limit: FEED_SIZE,
     });
 
-    const feedEntries = dbArticles.map(article => {
-      const sourceMeta = sourceMetaByUrl[article.source_url] || {};
-      const enriched = {
-        ...article,
-        _sourceTag: sourceMeta.sourceTag || 'unknown',
-        _topic: sourceMeta.topic || null,
-        _topicVerified: sourceMeta.topicVerified || false,
-      };
-      const cluster = clusterArticle(article.title, article.full_text, article.category);
-      const score = scoreArticle(
-        enriched,
-        userEmbedding,
-        articleEmbeddings[article.id] || null,
-        fetchInterests,
-        behavior.topClusters || [],
-        cluster,
-      );
-      const summary = extractSummary(article.full_text);
-      const bestInterest = findBestInterest(article.title, article.full_text, fetchInterests) ||
-        (enriched._topicVerified ? enriched._topic : null);
-      const rationale = generateRationale(bestInterest, score);
-
-      return {
-        user_id:      user.id,
-        article_id:   article.id,
-        ai_rationale: rationale,
-        ai_summary:   summary,
-        cluster,
-        score,
-      };
-    });
-
-    // Score floor: drop articles with score < 0.30 (clearly off-topic)
-    // Then take top 20 from what remains
-    const SCORE_FLOOR = 0.30;
-    const TOP_N = 20;
-    const ranked = [...feedEntries]
-      .filter(e => e.score >= SCORE_FLOOR)
-      .sort((a, b) => b.score - a.score);
-    const relevantEntries = ranked.slice(0, TOP_N);
-
-    console.log(
-      `[process-news] Top ${relevantEntries.length} selected ` +
-      `(scores: ${relevantEntries[0]?.score?.toFixed(2)} → ${relevantEntries[relevantEntries.length - 1]?.score?.toFixed(2)})`
-    );
-
-    if (relevantEntries.length === 0) {
+    if (ranked.length === 0) {
       return NextResponse.json({ error: 'No relevant articles found' }, { status: 404 });
     }
-
-    // ── Step 7: Write user_news_feed ───────────────────────────────
-    // Update rows for articles already in the feed and insert the rest,
-    // rather than upsert: deployed databases may lack the
-    // (user_id, article_id) unique constraint that ON CONFLICT requires.
-    const { data: existingRows, error: existingErr } = await serviceClient
-      .from('user_news_feed')
-      .select('id, article_id')
-      .eq('user_id', user.id);
-    if (existingErr) throw existingErr;
-
-    const keepArticleIds = new Set(relevantEntries.map(entry => entry.article_id));
-    const existingIdByArticle = {};
-    const staleRowIds = [];
-    for (const row of existingRows || []) {
-      // Old articles and duplicate rows for the same article are removed
-      if (!keepArticleIds.has(row.article_id) || existingIdByArticle[row.article_id]) {
-        staleRowIds.push(row.id);
-      } else {
-        existingIdByArticle[row.article_id] = row.id;
-      }
-    }
-
-    const newEntries = relevantEntries.filter(entry => !existingIdByArticle[entry.article_id]);
-    if (newEntries.length > 0) {
-      const { error: insertErr } = await serviceClient.from('user_news_feed').insert(newEntries);
-      if (insertErr) throw insertErr;
-    }
-
-    const updates = await Promise.all(
-      relevantEntries
-        .filter(entry => existingIdByArticle[entry.article_id])
-        .map(entry => serviceClient
-          .from('user_news_feed')
-          .update(entry)
-          .eq('id', existingIdByArticle[entry.article_id]))
+    console.log(
+      `[process-news] Top ${ranked.length} selected ` +
+      `(scores: ${ranked[0].score.toFixed(2)} → ${ranked[ranked.length - 1].score.toFixed(2)})`
     );
-    const updateErr = updates.find(result => result.error)?.error;
-    if (updateErr) throw updateErr;
 
-    // Remove old entries only after the replacement entries are safely stored.
-    if (staleRowIds.length > 0) {
-      const { error: staleErr } = await serviceClient
-        .from('user_news_feed')
-        .delete()
-        .in('id', staleRowIds);
-      if (staleErr) throw staleErr;
-    }
+    // ── Step 3: Save the feed ──────────────────────────────────────
+    const entries = ranked.map(e => ({
+      user_id:      user.id,
+      article_id:   e.article.id,
+      ai_rationale: e.rationale,
+      ai_summary:   e.summary,
+      cluster:      e.cluster,
+      score:        e.score,
+    }));
+    await saveFeed(serviceClient, user.id, entries);
 
-    // ── Step 8: Daily Brief (template-based) ──────────────────────
+    // ── Step 4: Daily brief (template-based) ───────────────────────
     try {
-      const briefArticles = relevantEntries
-        .slice(0, 10)
-        .map(e => ({ title: dbArticlesById[e.article_id]?.title || '' }))
-        .filter(a => a.title);
-      const briefClusters = relevantEntries
-        .slice(0, 10)
-        .map(e => e.cluster)
-        .filter(Boolean);
-
-      const brief = buildBrief(briefArticles, briefClusters);
-
+      const top = ranked.slice(0, 10);
+      const brief = buildBrief(top.map(e => ({ title: e.article.title })), top.map(e => e.cluster));
       if (brief) {
-        await serviceClient
-          .from('profiles')
-          .update({ daily_brief: brief })
-          .eq('id', user.id);
-        console.log('[brief] Daily brief saved');
+        await serviceClient.from('profiles').update({ daily_brief: brief }).eq('id', user.id);
       }
     } catch (briefErr) {
       console.error('Daily brief error:', briefErr.message);
     }
 
-    // ── Step 9: Record the fetch time ──────────────────────────────
+    // ── Step 5: Record the fetch time ──────────────────────────────
     // The quota was already spent before fetching. The feed is saved now, so a
     // failure here is logged rather than failing (and refunding) the run.
     const { error: lastFetchErr } = await serviceClient
@@ -386,19 +244,20 @@ export async function POST(request) {
       .eq('id', user.id);
     if (lastFetchErr) console.error('last_fetch update error:', lastFetchErr.message);
 
-    const sourceTally = deduped.reduce((acc, a) => {
-      acc[a._sourceTag || 'unknown'] = (acc[a._sourceTag || 'unknown'] || 0) + 1;
+    const sourceTally = ranked.reduce((acc, e) => {
+      const tag = e.article.source_tag || 'unknown';
+      acc[tag] = (acc[tag] || 0) + 1;
       return acc;
     }, {});
 
     succeeded = true;
     return NextResponse.json({
       success: true,
-      articlesProcessed: relevantEntries.length,
-      embeddingsGenerated: Object.keys(articleEmbeddings).length,
+      articlesProcessed: ranked.length,
       sources: sourceTally,
+      searchedOnDemand: searched.length,
       behaviorProfile: behavior.hasHistory ? behavior.profileText : null,
-      mode: 'interest-driven',
+      mode: 'cache',
       quota: isPremium
         ? { isPremium: true, unlimited: true }
         : { isPremium: false, used: quota.used, remaining: Math.max(0, quota.limit - quota.used), limit: quota.limit },

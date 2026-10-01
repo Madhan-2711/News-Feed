@@ -1,60 +1,48 @@
 import { NextResponse } from 'next/server';
+import { sectionHeadlines } from '@/lib/sources/googlenews';
 
-const TOPIC_MAP = {
-  sports:   'sports',
-  world:    'world',       // global breaking news (White House, wars, etc.)
-  business: 'business',
-  tech:     'technology',
-};
+// Home-page "live" sidebar from Google News section feeds (free, no key).
+// Upstream feeds are cached for 30 minutes.
+const CACHE_SECONDS = 1800;
 
-function getKey(index) {
-  const keys = (process.env.GNEWS_API_KEYS || process.env.GNEWS_API_KEY || '')
-    .split(',').map(k => k.trim()).filter(Boolean);
-  if (!keys.length) return null;
-  return keys[index % keys.length];
-}
-
-function mapItems(raw = []) {
-  return raw.slice(0, 5).map(a => ({
+function mapItems(items = []) {
+  return items.slice(0, 5).map(a => ({
     title:       a.title || 'Untitled',
-    source:      a.source?.name || 'Unknown',
-    url:         a.url || '#',
+    source:      a.source_name || 'Unknown',
+    url:         a.link || '#',
     publishedAt: a.publishedAt || new Date().toISOString(),
-    image:       a.image || null,
+    image:       a.image_url || null,
   }));
 }
 
-async function fetchTopic(topic, keyIndex) {
-  const key = getKey(keyIndex);
-  if (!key) return [];
+async function section(name) {
   try {
-    const res = await fetch(
-      `https://gnews.io/api/v4/top-headlines?topic=${topic}&lang=en&max=5&apikey=${key}`,
-      { next: { revalidate: 1800 } }          // 30-min Next.js cache
-    );
-    if (!res.ok) return [];
-    const data = await res.json();
-    return mapItems(data.articles);
-  } catch {
+    return await sectionHeadlines(name, { country: '', lang: 'en', revalidate: CACHE_SECONDS });
+  } catch (err) {
+    console.warn(`[live-categories] ${name} failed: ${err.message}`);
     return [];
   }
 }
 
 export async function GET() {
-  // Fetch 3 categories in parallel — each uses a different key slot
-  const [sports, world, bizRaw, techRaw] = await Promise.all([
-    fetchTopic(TOPIC_MAP.sports,   0),
-    fetchTopic(TOPIC_MAP.world,    1),
-    fetchTopic(TOPIC_MAP.business, 2),
-    fetchTopic(TOPIC_MAP.tech,     2),
+  const [sports, world, business, tech] = await Promise.all([
+    section('SPORTS'),
+    section('WORLD'),
+    section('BUSINESS'),
+    section('TECHNOLOGY'),
   ]);
 
+  // "Big moves": business and tech headlines, interleaved, without repeats
   const seen = new Set();
-  const bigMoves = [...bizRaw, ...techRaw].filter(a => {
-    if (seen.has(a.url)) return false;
-    seen.add(a.url);
+  const bigMoves = business.flatMap((b, i) => [b, tech[i]]).filter(a => {
+    if (!a || seen.has(a.link)) return false;
+    seen.add(a.link);
     return true;
-  }).slice(0, 5);
+  });
 
-  return NextResponse.json({ sports, world, bigMoves });
+  return NextResponse.json({
+    sports: mapItems(sports),
+    world: mapItems(world),
+    bigMoves: mapItems(bigMoves),
+  });
 }

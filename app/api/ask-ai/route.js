@@ -104,8 +104,11 @@ export async function POST(request) {
 
     let finalContext = article.full_text || '';
 
-    // Lazy load full text: if the text is short (just the GNews snippet), scrape it now
-    if (finalContext.length < 500 && article.source_url) {
+    // Lazy load full text: if the text is short (just a snippet), scrape it now.
+    // Google News links are redirect pages Firecrawl can't follow, so those
+    // answer from the stored title and description instead.
+    const scrapable = article.source_url && !/^https?:\/\/news\.google\.com\//.test(article.source_url);
+    if (finalContext.length < 500 && scrapable) {
       const scrapedText = await scrapeArticle(article.source_url);
       if (scrapedText && scrapedText.length > 200) {
         finalContext = scrapedText;

@@ -1,9 +1,9 @@
 import { NextResponse } from 'next/server';
 import { createClient as createServiceClient } from '@supabase/supabase-js';
 
-// Called by Vercel cron daily at 4 AM UTC.
-// Cleans stale articles from daily_cache (older than 48h)
-// and orphaned user_news_feed entries.
+// Called daily at 4 AM UTC (Vercel cron and Supabase pg_cron).
+// Deletes cached articles older than 48h, and topics nobody has requested
+// for a week (so the ingest job stops tracking them).
 
 export async function GET(request) {
   const cronSecret = process.env.CRON_SECRET;
@@ -26,12 +26,22 @@ export async function GET(request) {
       .lt('fetched_at', cutoff);
     if (cleanupError) throw cleanupError;
 
-    // user_news_feed and article_clicks reference daily_cache with ON DELETE CASCADE.
+    // user_news_feed, article_clicks and article_topics reference daily_cache
+    // with ON DELETE CASCADE.
     console.log(`[cleanup] Cache: ${cacheDeleted || 0} deleted`);
+
+    // 2. Stop tracking topics nobody has asked for in a week
+    const topicCutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const { count: topicsDeleted, error: topicError } = await serviceClient
+      .from('topic_refresh')
+      .delete({ count: 'exact' })
+      .lt('last_requested_at', topicCutoff);
+    if (topicError) console.error('[cleanup] Topic cleanup failed:', topicError.message);
 
     return NextResponse.json({
       success: true,
       cacheDeleted: cacheDeleted || 0,
+      topicsDeleted: topicsDeleted || 0,
       cutoff,
     });
   } catch (error) {
