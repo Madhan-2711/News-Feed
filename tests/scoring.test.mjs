@@ -84,3 +84,19 @@ test('keywords match whole words, not inside other words', () => {
   assert.equal(matchStrength('New visas for students announced', '', 'Travel'), MATCH.title);
   assert.equal(matchStrength('Jaffna flight unlocks tourism potential', '', 'Travel'), MATCH.title);
 });
+
+test('Football means soccer, not American football', () => {
+  assert.equal(matchStrength('Premier League: Arsenal beat Chelsea', '', 'Football'), MATCH.title);
+  assert.equal(matchStrength('Browns vs Steelers Thursday Night Football: how to watch NFL', '', 'Football'), 0);
+});
+
+test('an article with a picture wins a tie', () => {
+  const plain = scoreArticle(article('Cricket final tonight'), ['Cricket']);
+  const pictured = scoreArticle(article('Cricket final tonight', '', { image_url: 'https://img' }), ['Cricket']);
+  assert.ok(pictured.score > plain.score);
+});
+
+test('exclusions override a topic tag stored at collection time', () => {
+  const nfl = article('Rachaad White fantasy football injury update: will the RB play in the NFL game?');
+  assert.equal(scoreArticle(nfl, ['Football'], { topicRelevance: { Football: MATCH.title } }).score, 0);
+});
